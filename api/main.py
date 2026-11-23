@@ -56,24 +56,24 @@ import asyncio
 import time
 import hashlib
 import datetime as dt
-from google.cloud import firestore
-from google.cloud.firestore_v1.base_query import FieldFilter
 import sys
 from scraper.engine import SniperEngine
 from services.database import (
-    get_db, 
-    save_listing, 
-    get_sources, 
-    create_task, 
+    get_db,
+    save_listing,
+    get_sources,
+    create_task,
     create_listing_id,
-    update_task, 
+    update_task,
     get_user_alerts,
+    get_all_active_alerts,
+    delete_user_alert,
     get_user_profile,
-    save_search
+    save_search,
 )
 from services.notifications import EvolutionClient, MailerSendClient, ResendEmailClient
 
-app = FastAPI(title="HomeSeek Local Elite Node", version="24.0.0")
+app = FastAPI(title="Knightly Local Elite Node", version="24.0.0")
 
 # Enable CORS (Production Lockdown v126.0)
 app.add_middleware(
@@ -93,6 +93,8 @@ from routers.live_p24 import router as live_p24_router
 from routers.acoustics import router as acoustics_router
 from routers.reports_pro import router as reports_pro_router
 from routers.inspections import router as inspections_router
+from routers.workspace import router as workspace_router
+from routers.payments import router as payments_router
 app.include_router(community_router)
 app.include_router(reports_router)
 app.include_router(places_router)
@@ -101,6 +103,8 @@ app.include_router(live_p24_router)
 app.include_router(acoustics_router)
 app.include_router(reports_pro_router)
 app.include_router(inspections_router)
+app.include_router(workspace_router)
+app.include_router(payments_router)
 
 # [TOOL] State Management
 from intelligence.evaluator import PropertyEvaluator
@@ -530,20 +534,14 @@ async def get_health():
 
 @app.get("/analytics/active-snipers")
 async def get_active_snipers():
-    db = get_db()
-    # Fetch all alerts across all users (Collection Group)
-    # Note: Requires a Firestore Index for 'alerts' collection group
     try:
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        alerts = db.collection_group("alerts").where(filter=FieldFilter("is_active", "==", True)).stream()
+        alerts = await get_all_active_alerts()
         counts = {}
-        for a in alerts:
-            data = a.to_dict()
+        for data in alerts:
             area = data.get("target_area") or data.get("query") or "Unknown"
             counts[area] = counts.get(area, 0) + 1
         return counts
-    except Exception as e:
-        # Fallback for local dev if index isn't ready
+    except Exception:
         return {"Muizenberg": 12, "Sea Point": 8, "Kalk Bay": 5}
 
 @app.post("/ai-scout")
@@ -658,10 +656,9 @@ async def get_admin_stats(user_id: str):
     recent_sub = sorted(subs, key=lambda x: str(x.get('updated_at', '')), reverse=True)[0] if subs else None
     
     try:
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        active_snipers = db.collection_group("alerts").where(filter=FieldFilter("is_active", "==", True)).get()
+        active_snipers = await get_all_active_alerts()
         sniper_count = len(active_snipers)
-    except:
+    except Exception:
         sniper_count = 0
         
     return {
@@ -676,28 +673,42 @@ async def get_admin_stats(user_id: str):
 async def remove_alert(user_id: str, search_id: str):
     dummy_uid = "R4R2k7z2XAQGgRjB57ctZcOkEbp2"
     effective_id = get_effective_user_id(user_id, dummy_uid)
-    db = get_db()
-    db.collection("users").document(effective_id).collection("alerts").document(search_id).delete()
+    await delete_user_alert(effective_id, search_id)
     return {"status": "ok"}
 
 @app.post("/update-alert/{user_id}/{search_id}")
 async def update_alert(user_id: str, search_id: str, payload: dict):
     dummy_uid = "R4R2k7z2XAQGgRjB57ctZcOkEbp2"
     effective_id = get_effective_user_id(user_id, dummy_uid)
-    db = get_db()
-    db.collection("users").document(effective_id).collection("alerts").document(search_id).set(payload, merge=True)
+    from db.models import UserAlertModel
+    from db.session import SessionLocal
+    with SessionLocal() as sdb:
+        row = sdb.get(UserAlertModel, search_id)
+        if row:
+            merged = {**(row.alert_json or {}), **payload}
+            row.alert_json = merged
+            if "is_active" in payload:
+                row.is_active = bool(payload["is_active"])
+            row.updated_at = time.time()
+            sdb.commit()
     return {"status": "ok"}
 
 @app.post("/update-profile")
 async def update_profile(payload: dict):
     user_id = payload.get("user_id")
-    if not user_id: return {"status": "error", "message": "Missing user_id"}
-    db = get_db()
-    db.collection("users").document(user_id).set({
-        "whatsapp": payload.get("whatsapp"),
-        "email": payload.get("email"),
-        "updated_at": firestore.SERVER_TIMESTAMP
-    }, merge=True)
+    if not user_id:
+        return {"status": "error", "message": "Missing user_id"}
+    from db.models import UserProfileModel
+    from db.session import SessionLocal
+    with SessionLocal() as sdb:
+        row = sdb.get(UserProfileModel, user_id)
+        if not row:
+            row = UserProfileModel(user_id=user_id)
+            sdb.add(row)
+        row.email = payload.get("email") or row.email
+        row.profile_json = {**(row.profile_json or {}), "whatsapp": payload.get("whatsapp"), "email": payload.get("email")}
+        row.last_active = time.time()
+        sdb.commit()
     return {"status": "ok"}
     
 @app.post("/listings/manual")
@@ -725,12 +736,17 @@ async def update_user_tier(payload: dict):
     if not user_id or not tier:
         return {"status": "error", "message": "Missing user_id or tier"}
         
-    db = get_db()
-    db.collection("users").document(user_id).set({
-        "tier": tier.lower(),
-        "subscription_id": sub_id,
-        "updated_at": firestore.SERVER_TIMESTAMP
-    }, merge=True)
+    from db.models import UserProfileModel
+    from db.session import SessionLocal
+    with SessionLocal() as sdb:
+        row = sdb.get(UserProfileModel, user_id)
+        if not row:
+            row = UserProfileModel(user_id=user_id)
+            sdb.add(row)
+        row.tier = tier.lower()
+        row.profile_json = {**(row.profile_json or {}), "subscription_id": sub_id}
+        row.last_active = time.time()
+        sdb.commit()
     
     from services.database import get_user_profile
     profile = await get_user_profile(user_id)
@@ -753,11 +769,14 @@ async def update_user_tier(payload: dict):
 
 @app.get("/unsubscribe/{user_id}")
 async def unsubscribe_user(user_id: str):
-    db = get_db()
-    db.collection("users").document(user_id).set({
-        "notify_email": False,
-        "updated_at": firestore.SERVER_TIMESTAMP
-    }, merge=True)
+    from db.models import UserProfileModel
+    from db.session import SessionLocal
+    with SessionLocal() as sdb:
+        row = sdb.get(UserProfileModel, user_id)
+        if row:
+            row.profile_json = {**(row.profile_json or {}), "notify_email": False}
+            row.last_active = time.time()
+            sdb.commit()
     return {"status": "ok", "message": "You have been unsubscribed from property alerts."}
 
 @app.get("/geofence/suburbs")

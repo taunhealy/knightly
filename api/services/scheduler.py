@@ -1,9 +1,11 @@
 import asyncio
 import datetime as dt
 import hashlib
+import time
 from typing import List, Dict, Any, Optional
-from google.cloud import firestore
-from services.database import get_db, print_safe
+from db.models import AlertReportModel, SentAlertListingModel, UserAlertModel, UserProfileModel
+from db.session import SessionLocal, init_db
+from services.database import get_all_active_alerts, get_user_alerts, get_user_profile, print_safe
 from services.ai_scout import scout_engine, ScoutPreferences, AIScoutResult
 from services.notifications import EvolutionClient, ResendEmailClient
 
@@ -60,29 +62,25 @@ class DailyScoutScheduler:
 
     async def run_global_daily_scout(self, force_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Executes daily intelligence scout across all active user alerts or for a specific user.
+        Executes daily intelligence scout across all active user alerts in Supabase Postgres.
         """
-        db = get_db()
-        if not db:
-            print_safe("[SCHEDULER] Firestore not connected.")
-            return []
-
+        init_db()
         generated_reports = []
         try:
-            # Query all active alerts across all users
             if force_user_id:
-                alerts_docs = db.collection("users").document(force_user_id).collection("alerts").where("is_active", "==", True).stream()
-                all_alerts = [{"user_id": force_user_id, "alert_id": d.id, **d.to_dict()} for d in alerts_docs]
+                raw_alerts = await get_user_alerts(force_user_id)
+                all_alerts = [
+                    {"user_id": force_user_id, "alert_id": a.get("id"), **a}
+                    for a in raw_alerts
+                    if a.get("is_active") is not False
+                ]
             else:
-                # Query across users' alerts collection without requiring composite indexes
-                all_alerts = []
-                users = db.collection("users").stream()
-                for u in users:
-                    alerts_docs = db.collection("users").document(u.id).collection("alerts").stream()
-                    for d in alerts_docs:
-                        data = d.to_dict()
-                        if data.get("is_active") is not False:
-                            all_alerts.append({"user_id": u.id, "alert_id": d.id, **data})
+                raw_alerts = await get_all_active_alerts()
+                all_alerts = [
+                    {"user_id": a.get("user_id"), "alert_id": a.get("id"), **a}
+                    for a in raw_alerts
+                    if a.get("is_active") is not False
+                ]
 
             print_safe(f"[SCHEDULER] Found {len(all_alerts)} active alerts to scout.")
 
@@ -104,9 +102,17 @@ class DailyScoutScheduler:
         return generated_reports
 
     async def generate_alert_report(self, user_id: str, alert: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Scouts portals, runs Gemini ranking, saves report to Firestore, and notifies user."""
-        db = get_db()
+        """Scouts portals, deduplicates already-alerted listings, deducts 1 credit per qualifying match, and notifies."""
         now_sast = dt.datetime.now(SAST_TZ)
+        alert_id = str(alert.get("alert_id") or alert.get("id") or "gen")
+
+        # Check available AI credits before running Gemini scoring
+        with SessionLocal() as db:
+            prof = db.get(UserProfileModel, user_id)
+            credits_left = int(getattr(prof, "ai_credits", 50)) if prof else 50
+            if credits_left <= 0:
+                print_safe(f"[SCHEDULER] Skipping alert {alert_id} for {user_id}: 0 AI credits remaining.")
+                return None
         
         # Prepare preferences from alert config
         areas = alert.get("areas")
@@ -140,13 +146,28 @@ class DailyScoutScheduler:
         print_safe(f"[SCHEDULER] Scouting for user {user_id} across {prefs.areas} (Max: R {prefs.max_price})...")
         scout_res: AIScoutResult = await scout_engine.scout_and_rank(prefs)
 
-        # Filter by user's minimum AI Fit threshold (suppresses noisy non-matching listings)
+        # Filter by user's minimum AI Fit threshold AND deduplicate against previously alerted listings
         min_fit_score = int(alert.get("min_fit_score") or 0)
-        filtered_ranked = [
-            l for l in scout_res.ranked_listings
-            if min_fit_score <= 0 or (getattr(l, "match_score", 0) or 0) >= min_fit_score
-        ]
-        top_10 = filtered_ranked[:10]
+        with SessionLocal() as db:
+            seen_rows = (
+                db.query(SentAlertListingModel.listing_id)
+                .filter(SentAlertListingModel.alert_id == alert_id)
+                .all()
+            )
+            seen_ids = {r[0] for r in seen_rows}
+
+        filtered_ranked = []
+        for l in scout_res.ranked_listings:
+            lid = str(getattr(l, "id", "") or getattr(l, "url", "") or hashlib.sha256(str(getattr(l, "title", "")).encode()).hexdigest()[:16])
+            score = getattr(l, "match_score", 0) or 0
+            if (min_fit_score <= 0 or score >= min_fit_score) and lid not in seen_ids:
+                filtered_ranked.append((lid, score, l))
+
+        if not filtered_ranked:
+            print_safe(f"[SCHEDULER] No new qualifying matches (>= {min_fit_score}%) for alert {alert_id}.")
+            return None
+
+        top_10 = [item[2] for item in filtered_ranked[:10]]
         ranked_dicts = [l.dict() for l in top_10]
         
         # Populate commute & location proximities if anchors are set
@@ -180,24 +201,49 @@ class DailyScoutScheduler:
             "location_anchors": anchors
         }
 
-        # 1. Save Report in User's Private Subcollection
-        db.collection("users").document(user_id).collection("reports").document(report_id).set(report_data)
-        
-        # 2. Update Alert's last_run_at telemetry
-        alert_ref = alert.get("alert_id")
-        if alert_ref:
-            try:
-                db.collection("users").document(user_id).collection("alerts").document(alert_ref).set({
+        # 1. Save Report, record deduplicated sent listings & deduct 1 AI credit per qualifying match
+        now_ts = time.time()
+        with SessionLocal() as db:
+            db.add(
+                AlertReportModel(
+                    id=report_id,
+                    user_id=user_id,
+                    alert_id=alert_id,
+                    report_json=report_data,
+                    created_at=now_ts,
+                )
+            )
+            for lid, score, _ in filtered_ranked[:10]:
+                sent_pk = f"{alert_id}:{lid}"
+                if not db.get(SentAlertListingModel, sent_pk):
+                    db.add(
+                        SentAlertListingModel(
+                            id=sent_pk,
+                            alert_id=alert_id,
+                            user_id=user_id,
+                            listing_id=lid,
+                            fit_score=int(score),
+                            sent_at=now_ts,
+                        )
+                    )
+            prof = db.get(UserProfileModel, user_id)
+            if prof and prof.ai_credits is not None:
+                from core.credits import charge_credits
+                charge_credits(user_id, "alert_match", {"alert_id": alert_id, "matches": len(top_10)}, override_cost=len(top_10))
+            alert_row = db.get(UserAlertModel, alert_id)
+            if alert_row:
+                alert_row.alert_json = {
+                    **(alert_row.alert_json or {}),
                     "last_run_at": now_sast.isoformat(),
                     "last_report_id": report_id,
-                    "last_match_count": len(top_10)
-                }, merge=True)
-            except Exception:
-                pass
+                    "last_match_count": len(top_10),
+                }
+                alert_row.updated_at = now_ts
+            db.commit()
 
-        print_safe(f"[SCHEDULER] ✅ Saved Daily Report {report_id} with {len(top_10)} ranked listings.")
+        print_safe(f"[SCHEDULER] Saved Daily Report {report_id} with {len(top_10)} NEW qualifying listings.")
 
-        # 3. Deliver Notifications (WhatsApp / Email)
+        # 2. Deliver Notifications (WhatsApp / Email)
         await self._dispatch_notifications(user_id, alert, report_data)
 
         return report_data
@@ -208,9 +254,7 @@ class DailyScoutScheduler:
         if not top_listings:
             return
 
-        db = get_db()
-        user_doc = db.collection("users").document(user_id).get()
-        user_profile = user_doc.to_dict() if user_doc.exists else {}
+        user_profile = await get_user_profile(user_id)
 
         whatsapp_num = user_profile.get("whatsapp") or alert.get("whatsapp_number")
         email_addr = user_profile.get("email") or alert.get("notification_email")

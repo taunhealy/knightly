@@ -2,8 +2,9 @@ import os
 import re
 import sys
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from core.auth import AuthUser, get_current_user
 
 router = APIRouter(tags=["vision"])
 
@@ -212,13 +213,28 @@ def _build_heuristic_vision_fallback(req: ForensicVisionRequest, clean_imgs: lis
     }
 
 @router.post("/api/listing/forensic-vision")
-async def listing_forensic_vision(req: ForensicVisionRequest):
+async def listing_forensic_vision(req: ForensicVisionRequest, current_user: AuthUser = Depends(get_current_user)):
     """Inspects listing gallery photos + tenant-uploaded viewing/off-portal photos with Gemini Vision."""
     uploaded_imgs = [u for u in (req.uploaded_images or []) if isinstance(u, str) and u.startswith("data:image/")][:8]
     mode = (req.photo_source_mode or "both").lower()
     cache_key = f"v3::{req.id or req.url}::{mode}::{len(uploaded_imgs)}::{req.personal_preferences.strip()[:80]}"
     if not uploaded_imgs and cache_key in _forensic_vision_cache:
         return {"status": "success", "vision": _forensic_vision_cache[cache_key], "cached": True}
+
+    if not uploaded_imgs:
+        try:
+            from db.models import AiAnalysisModel
+            from db.session import SessionLocal
+            with SessionLocal() as db:
+                cached_row = db.get(AiAnalysisModel, cache_key)
+                if cached_row and isinstance(cached_row.forensic_json, dict) and cached_row.forensic_json:
+                    _forensic_vision_cache[cache_key] = cached_row.forensic_json
+                    return {"status": "success", "vision": cached_row.forensic_json, "cached": True}
+        except Exception:
+            pass
+
+    from core.credits import charge_credits, require_credits
+    require_credits(current_user.uid, "forensic_vision")
 
     # Resolve building/complex intelligence via building_reviews.py
     building_intel = None
@@ -354,6 +370,21 @@ Return STRICT JSON only (no markdown fences) with these exact keys:
                 parsed["is_fallback"] = False
                 parsed["model"] = m_name
                 _forensic_vision_cache[cache_key] = parsed
+                if not uploaded_imgs:
+                    try:
+                        import time as _time
+                        from db.models import AiAnalysisModel
+                        from db.session import SessionLocal
+                        with SessionLocal() as db:
+                            row = db.get(AiAnalysisModel, cache_key)
+                            if not row:
+                                row = AiAnalysisModel(listing_id=cache_key)
+                                db.add(row)
+                            row.forensic_json = parsed
+                            row.updated_at = _time.time()
+                            db.commit()
+                    except Exception:
+                        pass
                 if req.id and parsed.get("stove_type") in ("gas", "induction", "electric"):
                     try:
                         from services.listings_db import update_listing_vision_attributes
@@ -362,7 +393,8 @@ Return STRICT JSON only (no markdown fences) with these exact keys:
                         update_cached_listing_fields(req.id, {"stove_type": parsed["stove_type"], "vision_verified": True})
                     except Exception:
                         pass
-                return {"status": "success", "vision": parsed, "cached": False}
+                remaining = charge_credits(current_user.uid, "forensic_vision", {"listing_id": req.id})
+                return {"status": "success", "vision": parsed, "cached": False, "ai_credits": remaining}
             except Exception as e:
                 last_err = e
                 # If quota/availability/model-version error, try fallback model
@@ -521,11 +553,14 @@ def _build_compare_fallback(props: List[Dict[str, Any]], prefs: str = "", reason
 
 
 @router.post("/api/properties/compare")
-async def compare_properties_ai(req: ComparePropertiesRequest):
+async def compare_properties_ai(req: ComparePropertiesRequest, current_user: AuthUser = Depends(get_current_user)):
     """Runs a side-by-side AI comparison across 2–4 shortlisted properties tailored to user preferences."""
     props = (req.properties or [])[:4]
     if len(props) < 2:
         raise HTTPException(status_code=400, detail="Please select at least 2 properties to compare.")
+
+    from core.credits import charge_credits, require_credits
+    require_credits(current_user.uid, "compare_ai")
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
@@ -649,7 +684,8 @@ Return STRICT JSON only (no markdown fences):
                 parsed = json_mod.loads(text)
                 parsed["is_fallback"] = False
                 parsed["model"] = m_name
-                return {"status": "success", "comparison": parsed}
+                remaining = charge_credits(current_user.uid, "compare_ai", {"count": len(props)})
+                return {"status": "success", "comparison": parsed, "ai_credits": remaining}
             except Exception as e:
                 err_str = str(e)
                 if any(k in err_str for k in ("RESOURCE_EXHAUSTED", "429", "402", "404", "NOT_FOUND", "503", "UNAVAILABLE")):
@@ -675,11 +711,14 @@ class ListingChatRequest(BaseModel):
 
 
 @router.post("/api/listing/chat")
-async def listing_followup_chat(req: ListingChatRequest):
+async def listing_followup_chat(req: ListingChatRequest, current_user: AuthUser = Depends(get_current_user)):
     """Continues the forensic inspection conversation for a single property."""
     question = (req.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    from core.credits import charge_credits, require_credits
+    require_credits(current_user.uid, "listing_chat")
 
     prop = req.property or {}
     audit = req.audit or {}
@@ -781,7 +820,8 @@ async def listing_followup_chat(req: ListingChatRequest):
                 )
                 reply = (getattr(resp, "text", None) or "").strip()
                 if reply:
-                    return {"status": "success", "reply": reply, "is_fallback": False, "model": m_name}
+                    remaining = charge_credits(current_user.uid, "listing_chat", {"listing_id": prop.get("id")})
+                    return {"status": "success", "reply": reply, "is_fallback": False, "model": m_name, "ai_credits": remaining}
             except Exception as e:
                 err_str = str(e)
                 if any(k in err_str for k in ("RESOURCE_EXHAUSTED", "429", "402", "404", "NOT_FOUND", "503", "UNAVAILABLE")):

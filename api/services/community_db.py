@@ -24,11 +24,9 @@ _NOUNS = [
 ]
 
 
-def _get_connection() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_connection():
+    from db.compat import get_compat_connection
+    return get_compat_connection(str(DB_PATH))
 
 
 def init_community_db():
@@ -41,10 +39,15 @@ def init_community_db():
                 created_at REAL NOT NULL
             )
         """)
+        conn.commit()
         try:
             conn.execute("ALTER TABLE user_nicknames ADD COLUMN avatar_url TEXT")
-        except sqlite3.OperationalError:
-            pass
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS listing_comments (
                 id TEXT PRIMARY KEY,
@@ -53,9 +56,29 @@ def init_community_db():
                 nickname TEXT NOT NULL,
                 body TEXT NOT NULL,
                 created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                floor_number TEXT DEFAULT '',
+                unit_number TEXT DEFAULT '',
+                normalized_address TEXT DEFAULT '',
+                media_json TEXT DEFAULT '[]'
             )
         """)
+        conn.commit()
+        for col_sql in (
+            "ALTER TABLE listing_comments ADD COLUMN floor_number TEXT DEFAULT ''",
+            "ALTER TABLE listing_comments ADD COLUMN unit_number TEXT DEFAULT ''",
+            "ALTER TABLE listing_comments ADD COLUMN normalized_address TEXT DEFAULT ''",
+            "ALTER TABLE listing_comments ADD COLUMN media_json TEXT DEFAULT '[]'",
+            "ALTER TABLE listing_comments ADD COLUMN tags_json TEXT DEFAULT '[]'",
+        ):
+            try:
+                conn.execute(col_sql)
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users_auth (
                 user_id TEXT PRIMARY KEY,
@@ -105,7 +128,11 @@ def get_or_create_nickname(user_id: str) -> str:
                 )
                 conn.commit()
                 return candidate
-            except sqlite3.IntegrityError:
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
                 continue
 
         fallback = f"Seeker{uuid.uuid4().hex[:6].upper()}"
@@ -297,39 +324,140 @@ def get_latest_comments_by_listing() -> Dict[str, Dict[str, Any]]:
     return {lid: items[0] for lid, items in recent.items() if items}
 
 
-def get_listing_comments(listing_id: str) -> List[Dict[str, Any]]:
+def _normalize_addr_key(address: str) -> str:
+    import re
+    raw = re.sub(r"[^a-z0-9\s]", " ", (address or "").lower())
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _persist_comment_media(listing_id: str, media_items: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    import base64
+    import json
+    import re
+    if not media_items:
+        return []
+    from core.storage import upload_media_object
+    local_dir = str(Path(__file__).resolve().parent.parent / "data" / "listing_media")
+    safe_lid = re.sub(r"[^a-zA-Z0-9_-]", "", listing_id) or "listing"
+    persisted: List[Dict[str, Any]] = []
+    for m in media_items[:6]:
+        m_type = "video" if str(m.get("type", "")).lower() == "video" else "image"
+        caption = str(m.get("caption") or "").strip()
+        raw_url = str(m.get("url") or m.get("data") or "").strip()
+        if not raw_url:
+            continue
+        final_url = raw_url
+        if "base64," in raw_url:
+            try:
+                b64_part = raw_url.split("base64,", 1)[1]
+                raw_bytes = base64.b64decode(b64_part)
+                ext = "mp4" if m_type == "video" else "jpg"
+                ctype = "video/mp4" if m_type == "video" else "image/jpeg"
+                fname = f"view-{uuid.uuid4().hex[:10]}.{ext}"
+                final_url = upload_media_object(
+                    prefix="listings",
+                    entity_id=safe_lid,
+                    filename=fname,
+                    raw_bytes=raw_bytes,
+                    local_dir=local_dir,
+                    content_type=ctype,
+                    fallback_url_prefix="/api/listings/media",
+                )
+            except Exception:
+                continue
+        persisted.append({"type": m_type, "url": final_url, "caption": caption})
+    return persisted
+
+
+def get_listing_comments(listing_id: str, address: str = "") -> List[Dict[str, Any]]:
+    import json
     norm_id = _normalize_listing_id(listing_id)
+    norm_addr = _normalize_addr_key(address)
     with _get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, listing_id, user_id, nickname, body, created_at, updated_at
-            FROM listing_comments
-            WHERE listing_id = ?
-            ORDER BY created_at DESC
-            """,
-            (norm_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        if norm_addr and len(norm_addr) > 8:
+            rows = conn.execute(
+                """
+                SELECT id, listing_id, user_id, nickname, body, created_at, updated_at,
+                       floor_number, unit_number, normalized_address, media_json, tags_json
+                FROM listing_comments
+                WHERE listing_id = ? OR normalized_address = ?
+                ORDER BY created_at DESC
+                """,
+                (norm_id, norm_addr),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, listing_id, user_id, nickname, body, created_at, updated_at,
+                       floor_number, unit_number, normalized_address, media_json, tags_json
+                FROM listing_comments
+                WHERE listing_id = ?
+                ORDER BY created_at DESC
+                """,
+                (norm_id,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["media"] = json.loads(d.pop("media_json", "[]") or "[]")
+            except Exception:
+                d["media"] = []
+            try:
+                d["tags"] = json.loads(d.pop("tags_json", "[]") or "[]")
+            except Exception:
+                d["tags"] = []
+            out.append(d)
+        return out
 
 
-def create_listing_comment(listing_id: str, user_id: str, body: str) -> Dict[str, Any]:
+def create_listing_comment(
+    listing_id: str,
+    user_id: str,
+    body: str,
+    floor_number: str = "",
+    unit_number: str = "",
+    address: str = "",
+    media: Optional[List[Dict[str, Any]]] = None,
+    tags: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    import json
     norm_id = _normalize_listing_id(listing_id)
     uid = str(user_id or "").strip() or f"guest-{uuid.uuid4().hex[:8]}"
     clean_body = (body or "").strip()
-    if not clean_body:
-        raise ValueError("Comment cannot be empty.")
+    persisted_media = _persist_comment_media(norm_id, media)
+    clean_tags = [str(t).strip()[:48] for t in (tags or []) if str(t).strip()][:20]
+    if not clean_body and not persisted_media and not clean_tags:
+        raise ValueError("Comment, viewing checklist tags, or media is required.")
 
     nickname = get_or_create_nickname(uid)
     cid = str(uuid.uuid4())
     now = time.time()
+    floor_clean = (floor_number or "").strip()[:32]
+    unit_clean = (unit_number or "").strip()[:32]
+    norm_addr = _normalize_addr_key(address)
 
     with _get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO listing_comments (id, listing_id, user_id, nickname, body, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO listing_comments
+            (id, listing_id, user_id, nickname, body, created_at, updated_at, floor_number, unit_number, normalized_address, media_json, tags_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (cid, norm_id, uid, nickname, clean_body, now, now),
+            (
+                cid,
+                norm_id,
+                uid,
+                nickname,
+                clean_body,
+                now,
+                now,
+                floor_clean,
+                unit_clean,
+                norm_addr,
+                json.dumps(persisted_media),
+                json.dumps(clean_tags),
+            ),
         )
         conn.commit()
 
@@ -339,6 +467,11 @@ def create_listing_comment(listing_id: str, user_id: str, body: str) -> Dict[str
         "user_id": uid,
         "nickname": nickname,
         "body": clean_body,
+        "floor_number": floor_clean,
+        "unit_number": unit_clean,
+        "normalized_address": norm_addr,
+        "media": persisted_media,
+        "tags": clean_tags,
         "created_at": now,
         "updated_at": now,
     }

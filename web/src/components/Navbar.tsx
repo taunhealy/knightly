@@ -23,6 +23,7 @@ import {
 import { getCompareList, getPlanSummary, type PlanSummary } from '@/lib/pro-plan';
 import { useAuth } from '@/lib/auth-context';
 import { KnightAvatar } from '@/components/KnightAvatar';
+import { pullWorkspaceFromServer, pushWorkspaceToServer } from '@/lib/workspaceSync';
 
 interface NavbarProps {
   user?: any;
@@ -143,6 +144,27 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const [isOpen, setIsOpen] = useState(false);
   const [isAlertsOpen, setIsAlertsOpen] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const syncDown = async () => {
+      const token = user?.getIdToken ? await user.getIdToken().catch(() => null) : null;
+      if (active) await pullWorkspaceFromServer(token, user?.uid || 'local-dev-user');
+    };
+    syncDown();
+
+    const syncUp = async () => {
+      const token = user?.getIdToken ? await user.getIdToken().catch(() => null) : null;
+      await pushWorkspaceToServer(token, user?.uid || 'local-dev-user');
+    };
+    window.addEventListener('homeseek-compare-updated', syncUp);
+    window.addEventListener('homeseek-favs-updated', syncUp);
+    return () => {
+      active = false;
+      window.removeEventListener('homeseek-compare-updated', syncUp);
+      window.removeEventListener('homeseek-favs-updated', syncUp);
+    };
+  }, [user]);
   const [navAlerts, setNavAlerts] = useState<Array<{
     id: string;
     title: string;
@@ -577,7 +599,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                           <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">
                             {profile?.nickname ? `u/${profile.nickname}` : 'Signed in as'}
                           </p>
-                          <p className="text-xs font-semibold text-zinc-950 truncate">{user.displayName || 'HomeSeek User'}</p>
+                          <p className="text-xs font-semibold text-zinc-950 truncate">{user.displayName || 'Knightly User'}</p>
                           <p className="text-[11px] text-zinc-600 truncate">{user.email}</p>
                         </div>
                       </div>
@@ -855,7 +877,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-base font-black text-zinc-950">
-                  {authMode === 'login' ? 'Sign in to HomeSeek' : 'Create HomeSeek Account'}
+                  {authMode === 'login' ? 'Sign in to Knightly' : 'Create Knightly Account'}
                 </h2>
                 <p className="text-[11px] text-zinc-500">
                   {authMode === 'login'

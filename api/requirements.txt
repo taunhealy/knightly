@@ -14,3 +14,6 @@ crawl4ai
 json-repair
 playwright-stealth
 google-cloud-tasks
+sqlalchemy
+psycopg[binary]
+boto3

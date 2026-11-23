@@ -18,7 +18,7 @@ export const Footer = () => {
             <div className="w-7 h-7 bg-zinc-950 text-white rounded-lg flex items-center justify-center font-bold text-sm">
               H
             </div>
-            <span className="text-base font-bold tracking-tight text-zinc-950">HomeSeek</span>
+            <span className="text-base font-bold tracking-tight text-zinc-950">Knightly</span>
           </div>
           <p className="text-xs text-zinc-600 mt-1">
             Real-time rental intelligence & proximity-driven property radar.
@@ -39,7 +39,7 @@ export const Footer = () => {
 
         {/* Copyright & Info */}
         <div className="text-xs text-zinc-600 text-center md:text-right">
-          &copy; {new Date().getFullYear()} HomeSeek. All rights reserved.
+          &copy; {new Date().getFullYear()} Knightly. All rights reserved.
         </div>
 
       </div>

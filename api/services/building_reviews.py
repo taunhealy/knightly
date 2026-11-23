@@ -16,9 +16,13 @@ class BuildingCacheDB:
         self.db_path = db_path
         self._init_db()
 
+    def _get_conn(self):
+        from db.compat import get_compat_connection
+        return get_compat_connection(self.db_path)
+
     def _init_db(self):
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_conn() as conn:
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS building_reviews_cache (
                         building_key TEXT PRIMARY KEY,
@@ -32,7 +36,7 @@ class BuildingCacheDB:
 
     def get(self, building_key: str, max_age_days: int = 14) -> Optional[Dict[str, Any]]:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_conn() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT data_json, updated_at FROM building_reviews_cache WHERE building_key = ?",
@@ -49,7 +53,7 @@ class BuildingCacheDB:
 
     def set(self, building_key: str, data: Dict[str, Any]):
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_conn() as conn:
                 conn.execute(
                     """
                     INSERT INTO building_reviews_cache (building_key, data_json, updated_at)

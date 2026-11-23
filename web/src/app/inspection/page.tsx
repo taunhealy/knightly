@@ -63,6 +63,29 @@ export default function IngoingInspectionPage() {
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [isEmailOpen, setIsEmailOpen] = useState(false);
   const [emailTarget, setEmailTarget] = useState('');
+  const [publicSnags, setPublicSnags] = useState<any[]>([]);
+  const [isPublicSnags, setIsPublicSnags] = useState(true);
+  const [privacyConfirmed, setPrivacyConfirmed] = useState(false);
+  const [privacyModalOpen, setPrivacyModalOpen] = useState(false);
+  const [keepPrivateChecked, setKeepPrivateChecked] = useState(false);
+
+  useEffect(() => {
+    const addr = propertyAddress.trim();
+    if (addr.length < 4) {
+      setPublicSnags([]);
+      return;
+    }
+    let active = true;
+    const t = setTimeout(async () => {
+      const { fetchPublicSnags } = await import('@/lib/workspaceSync');
+      const reports = await fetchPublicSnags({ address: addr });
+      if (active) setPublicSnags(reports);
+    }, 400);
+    return () => {
+      active = false;
+      clearTimeout(t);
+    };
+  }, [propertyAddress]);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [describingId, setDescribingId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -158,8 +181,9 @@ export default function IngoingInspectionPage() {
     ]);
   };
 
-  const handleSave = async () => {
+  const executeSave = async (overridePublic?: boolean) => {
     const effectiveUid = user?.uid || 'guest_inspector';
+    const effectivePublic = overridePublic !== undefined ? overridePublic : isPublicSnags;
     setIsSaving(true);
     setStatusMsg(null);
     try {
@@ -170,6 +194,7 @@ export default function IngoingInspectionPage() {
           id: inspectionId,
           user_id: effectiveUid,
           property_address: propertyAddress,
+          is_public_snags: effectivePublic,
           landlord_or_agent: landlordOrAgent,
           lease_start_date: leaseStartDate,
           water_meter: waterMeter,
@@ -181,12 +206,29 @@ export default function IngoingInspectionPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.detail || 'Save failed');
       setInspectionId(data.id);
-      setStatusMsg({ type: 'ok', text: `Saved ${items.length} inspection record(s) to HomeSeek.` });
+      setStatusMsg({ type: 'ok', text: `Saved ${items.length} inspection record(s) to Knightly.` });
     } catch (err: any) {
       setStatusMsg({ type: 'err', text: err?.message || 'Could not save inspection.' });
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleSave = async () => {
+    if (!privacyConfirmed && items.some((it) => it.status !== 'good')) {
+      setKeepPrivateChecked(!isPublicSnags);
+      setPrivacyModalOpen(true);
+      return;
+    }
+    await executeSave();
+  };
+
+  const handleConfirmPrivacyAndSave = async () => {
+    const nextPublic = !keepPrivateChecked;
+    setIsPublicSnags(nextPublic);
+    setPrivacyConfirmed(true);
+    setPrivacyModalOpen(false);
+    await executeSave(nextPublic);
   };
 
   const buildPayload = () => ({
@@ -423,6 +465,22 @@ export default function IngoingInspectionPage() {
       )}
 
       {/* Property, Meters & Keys */}
+      {publicSnags.length > 0 && (
+        <div className="rounded-3xl bg-amber-950/40 border border-amber-500/30 p-4 space-y-2">
+          <p className="text-xs font-extrabold uppercase tracking-wider text-amber-300">
+            Past Reported Snags Near / At This Address ({publicSnags.length})
+          </p>
+          {publicSnags.slice(0, 3).map((rep: any, idx: number) => (
+            <div key={idx} className="text-xs text-amber-100/90 space-y-1">
+              <p className="font-bold">{rep.property_address || rep.suburb} ({rep.match_type})</p>
+              {(rep.snags || []).slice(0, 3).map((s: any, si: number) => (
+                <p key={si} className="text-[11px] text-amber-200/80">• [{s.room}] {s.notes}</p>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="rounded-3xl bg-zinc-900/90 border border-white/10 p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <div className="space-y-1">
           <label className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Property Address</label>
@@ -706,6 +764,44 @@ export default function IngoingInspectionPage() {
         ))}
       </div>
       </main>
+
+      {privacyModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-3xl bg-zinc-900 border border-white/15 p-6 space-y-4 shadow-2xl">
+            <h3 className="text-base font-extrabold text-white">Public Snag Privacy Check</h3>
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Reporting snags publicly is <strong className="text-white">ON by default</strong> so future tenants can be aware of prior damage before signing a lease. Your name, agent details, and meter readings are never shared.
+            </p>
+            <label className="flex items-start gap-2.5 p-3 rounded-2xl bg-black/40 border border-white/10 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={keepPrivateChecked}
+                onChange={(e) => setKeepPrivateChecked(e.target.checked)}
+                className="mt-0.5 rounded border-zinc-600 text-indigo-500 focus:ring-indigo-500"
+              />
+              <span className="text-xs font-semibold text-zinc-200">
+                Keep this inspection Private (do not share snags publicly)
+              </span>
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPrivacyModalOpen(false)}
+                className="px-3.5 py-2 rounded-xl bg-zinc-800 text-xs font-bold text-zinc-300 hover:bg-zinc-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmPrivacyAndSave}
+                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white cursor-pointer"
+              >
+                {keepPrivateChecked ? 'Save Privately' : 'Confirm & Share Snags'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

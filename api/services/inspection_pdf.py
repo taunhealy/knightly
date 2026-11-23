@@ -1,9 +1,12 @@
 import base64
 import hashlib
 import io
+import os
 import textwrap
 from typing import Any, Dict, List, Tuple
 from PIL import Image
+
+_PHOTOS_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "inspection_photos")
 
 
 def _pdf_escape(text: str) -> str:
@@ -24,10 +27,26 @@ def _pdf_escape(text: str) -> str:
 
 
 def _decode_jpeg_for_pdf(data_url: str, max_w: int = 480, max_h: int = 360) -> Tuple[bytes, int, int] | None:
-    if not data_url or "base64," not in data_url:
+    if not data_url:
         return None
     try:
-        raw = base64.b64decode(data_url.split("base64,", 1)[1])
+        if "base64," in data_url:
+            raw = base64.b64decode(data_url.split("base64,", 1)[1])
+        elif "/api/inspections/photos/" in data_url:
+            rel = data_url.split("/api/inspections/photos/", 1)[1].split("?", 1)[0].lstrip("/")
+            parts = [p for p in rel.split("/") if p and p != ".."]
+            disk_path = os.path.join(_PHOTOS_ROOT, *parts)
+            if not os.path.isfile(disk_path):
+                return None
+            with open(disk_path, "rb") as f:
+                raw = f.read()
+        elif data_url.startswith("http://") or data_url.startswith("https://"):
+            import urllib.request
+            with urllib.request.urlopen(data_url, timeout=8) as resp:
+                raw = resp.read()
+        else:
+            return None
+
         img = Image.open(io.BytesIO(raw)).convert("RGB")
         img.thumbnail((max_w, max_h))
         out = io.BytesIO()
@@ -77,7 +96,7 @@ def build_inspection_pdf(payload: Dict[str, Any]) -> bytes:
             add_line(line, font=font, size=size, gap=gap, indent=indent)
 
     # Header
-    add_line("HOMESEEK INGOING MOVE-IN INSPECTION REPORT", font="F2", size=14, gap=18)
+    add_line("KNIGHTLY INGOING MOVE-IN INSPECTION REPORT", font="F2", size=14, gap=18)
     add_line("South African Rental Housing Act Pre-Occupation Record", font="F1", size=9, gap=16)
     add_line(f"Property Address: {address}", font="F2", size=11, gap=15)
     add_line(f"Tenant: {tenant_name}   |   Landlord / Agent: {agent}", font="F1", size=10, gap=14)

@@ -1,23 +1,35 @@
 import base64
 import json
 import os
+import re
 import smtplib
 import sqlite3
 import time
 import uuid
 from email.message import EmailMessage
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+from core.auth import AuthUser, get_current_user
+from db.models import InspectionModel
+from db.session import SessionLocal, init_db
 
 router = APIRouter(tags=["inspections"])
+init_db()
 
 _DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "inspections.db")
+_PHOTOS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "inspection_photos")
+
+
+def _normalize_addr(address: str) -> str:
+    raw = re.sub(r"[^a-z0-9\s]", " ", (address or "").lower())
+    return re.sub(r"\s+", " ", raw).strip()
 
 
 def _init_db():
     os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+    os.makedirs(_PHOTOS_DIR, exist_ok=True)
     with sqlite3.connect(_DB_PATH) as conn:
         conn.execute(
             """
@@ -31,13 +43,46 @@ def _init_db():
                 electricity_meter TEXT,
                 keys_notes TEXT,
                 items_json TEXT NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                property_id TEXT DEFAULT '',
+                normalized_address TEXT DEFAULT '',
+                suburb TEXT DEFAULT '',
+                lat REAL DEFAULT 0,
+                lng REAL DEFAULT 0,
+                is_public_snags INTEGER DEFAULT 0
             )
             """
         )
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(inspections)").fetchall()}
+        migrations = [
+            ("property_id", "TEXT DEFAULT ''"),
+            ("normalized_address", "TEXT DEFAULT ''"),
+            ("suburb", "TEXT DEFAULT ''"),
+            ("lat", "REAL DEFAULT 0"),
+            ("lng", "REAL DEFAULT 0"),
+            ("is_public_snags", "INTEGER DEFAULT 0"),
+        ]
+        for col_name, col_def in migrations:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE inspections ADD COLUMN {col_name} {col_def}")
 
 
 _init_db()
+
+
+def _persist_item_photo(insp_id: str, item_id: str, photo_data: str) -> str:
+    if not photo_data or "base64," not in photo_data:
+        return photo_data
+    try:
+        b64_part = photo_data.split("base64,", 1)[1]
+        raw = base64.b64decode(b64_part)
+        safe_insp = re.sub(r"[^a-zA-Z0-9_-]", "", insp_id) or "insp"
+        safe_item = re.sub(r"[^a-zA-Z0-9_-]", "", item_id) or uuid.uuid4().hex[:8]
+        filename = f"{safe_item}.jpg"
+        from core.storage import upload_inspection_photo
+        return upload_inspection_photo(safe_insp, filename, raw, _PHOTOS_DIR)
+    except Exception:
+        return photo_data
 
 
 class InspectionItemPayload(BaseModel):
@@ -51,8 +96,13 @@ class InspectionItemPayload(BaseModel):
 
 class SaveInspectionRequest(BaseModel):
     id: Optional[str] = None
-    user_id: str
+    user_id: str = ""
+    property_id: str = ""
     property_address: str = ""
+    suburb: str = ""
+    lat: float = 0.0
+    lng: float = 0.0
+    is_public_snags: bool = False
     landlord_or_agent: str = ""
     lease_start_date: str = ""
     water_meter: str = ""
@@ -77,67 +127,180 @@ class GenerateCriteriaRequest(BaseModel):
     property_address: str = ""
 
 
+@router.get("/api/inspections/photos/{insp_id}/{filename}")
+async def get_inspection_photo(insp_id: str, filename: str):
+    safe_insp = re.sub(r"[^a-zA-Z0-9_-]", "", insp_id)
+    safe_file = os.path.basename(filename)
+    path = os.path.join(_PHOTOS_DIR, safe_insp, safe_file)
+    if os.path.isfile(path):
+        return FileResponse(path, media_type="image/jpeg")
+    from core.storage import fetch_r2_photo
+    r2_bytes = fetch_r2_photo(safe_insp, safe_file)
+    if r2_bytes is not None:
+        return Response(content=r2_bytes, media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="Inspection photo not found")
+
+
+@router.get("/api/inspections/public-snags")
+async def get_public_snags(
+    property_id: str = "",
+    address: str = "",
+    suburb: str = "",
+):
+    """
+    Returns anonymized, opt-in public snag summaries for a relisted property ID,
+    matching normalized address, or nearby suburb/Ghost area (no PII exposed).
+    """
+    pid = (property_id or "").strip()
+    norm_addr = _normalize_addr(address)
+    sub = (suburb or "").strip().lower()
+
+    with SessionLocal() as db:
+        rows = (
+            db.query(InspectionModel)
+            .filter(InspectionModel.is_public_snags.is_(True))
+            .order_by(InspectionModel.updated_at.desc())
+            .limit(100)
+            .all()
+        )
+
+    matches = []
+    for r in rows:
+        row_pid = (r.property_id or "").strip()
+        row_norm = (r.normalized_address or "").strip()
+        row_sub = (r.suburb or "").strip().lower()
+        match_type = None
+        if pid and row_pid and pid == row_pid:
+            match_type = "exact_property"
+        elif norm_addr and row_norm and (norm_addr == row_norm or (len(norm_addr) > 10 and norm_addr in row_norm)):
+            match_type = "address_match"
+        elif sub and row_sub and sub == row_sub:
+            match_type = "area_ghost"
+        if not match_type:
+            continue
+
+        items = r.items_json if isinstance(r.items_json, list) else []
+        snag_items = [
+            {
+                "room": it.get("room", "General"),
+                "status": it.get("status", "defect"),
+                "notes": it.get("notes", ""),
+                "captured_at": it.get("captured_at", ""),
+                "photo_url": it.get("photo_data", "") if str(it.get("photo_data", "")).startswith("/api/") else "",
+            }
+            for it in items
+            if (it.get("status") or "defect") != "ok" or it.get("notes")
+        ]
+        if not snag_items:
+            continue
+        matches.append({
+            "inspection_id": r.id,
+            "match_type": match_type,
+            "property_address": r.property_address or "",
+            "suburb": r.suburb or "",
+            "updated_at": r.updated_at,
+            "snags": snag_items,
+        })
+
+    return {"status": "success", "count": len(matches), "reports": matches[:10]}
+
+
 @router.get("/api/inspections")
-async def list_inspections(user_id: str):
-    uid = (user_id or "").strip()
+async def list_inspections(user_id: str = "", current_user: AuthUser = Depends(get_current_user)):
+    uid = current_user.uid if current_user.is_authenticated else ((user_id or "").strip() or current_user.uid)
     if not uid:
         return {"status": "success", "inspections": []}
-    with sqlite3.connect(_DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM inspections WHERE user_id = ? ORDER BY updated_at DESC LIMIT 20",
-            (uid,),
-        ).fetchall()
+    with SessionLocal() as db:
+        rows = (
+            db.query(InspectionModel)
+            .filter(InspectionModel.user_id == uid)
+            .order_by(InspectionModel.updated_at.desc())
+            .limit(20)
+            .all()
+        )
     out = []
     for r in rows:
-        try:
-            items = json.loads(r["items_json"] or "[]")
-        except Exception:
-            items = []
+        items = r.items_json if isinstance(r.items_json, list) else []
         out.append({
-            "id": r["id"],
-            "user_id": r["user_id"],
-            "property_address": r["property_address"] or "",
-            "landlord_or_agent": r["landlord_or_agent"] or "",
-            "lease_start_date": r["lease_start_date"] or "",
-            "water_meter": r["water_meter"] or "",
-            "electricity_meter": r["electricity_meter"] or "",
-            "keys_notes": r["keys_notes"] or "",
+            "id": r.id,
+            "user_id": r.user_id,
+            "property_id": r.property_id or "",
+            "property_address": r.property_address or "",
+            "suburb": r.suburb or "",
+            "lat": r.lat or 0.0,
+            "lng": r.lng or 0.0,
+            "is_public_snags": bool(r.is_public_snags),
+            "landlord_or_agent": r.landlord_or_agent or "",
+            "lease_start_date": r.lease_start_date or "",
+            "water_meter": r.water_meter or "",
+            "electricity_meter": r.electricity_meter or "",
+            "keys_notes": r.keys_notes or "",
             "items": items,
-            "updated_at": r["updated_at"],
+            "updated_at": r.updated_at,
         })
     return {"status": "success", "inspections": out}
 
 
 @router.post("/api/inspections")
-async def save_inspection(req: SaveInspectionRequest):
-    uid = (req.user_id or "").strip()
+async def save_inspection(req: SaveInspectionRequest, current_user: AuthUser = Depends(get_current_user)):
+    uid = current_user.uid if current_user.is_authenticated else ((req.user_id or "").strip() or current_user.uid)
     if not uid:
         raise HTTPException(status_code=400, detail="Missing user_id")
     insp_id = (req.id or "").strip() or f"insp-{uuid.uuid4().hex[:12]}"
     now = time.time()
-    items_json = json.dumps([it.model_dump() for it in req.items])
-    with sqlite3.connect(_DB_PATH) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO inspections
-            (id, user_id, property_address, landlord_or_agent, lease_start_date, water_meter, electricity_meter, keys_notes, items_json, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                insp_id,
-                uid,
-                req.property_address,
-                req.landlord_or_agent,
-                req.lease_start_date,
-                req.water_meter,
-                req.electricity_meter,
-                req.keys_notes,
-                items_json,
-                now,
-            ),
-        )
-    return {"status": "success", "id": insp_id, "updated_at": now}
+    persisted_items = []
+    for it in req.items:
+        d = it.model_dump()
+        d["photo_data"] = _persist_item_photo(insp_id, d["id"], d.get("photo_data", ""))
+        persisted_items.append(d)
+    norm_addr = _normalize_addr(req.property_address)
+    with SessionLocal() as db:
+        row = db.get(InspectionModel, insp_id)
+        if not row:
+            row = InspectionModel(id=insp_id, user_id=uid)
+            db.add(row)
+        row.user_id = uid
+        row.property_id = req.property_id
+        row.property_address = req.property_address
+        row.normalized_address = norm_addr
+        row.suburb = req.suburb
+        row.lat = req.lat
+        row.lng = req.lng
+        row.is_public_snags = bool(req.is_public_snags)
+        row.landlord_or_agent = req.landlord_or_agent
+        row.lease_start_date = req.lease_start_date
+        row.water_meter = req.water_meter
+        row.electricity_meter = req.electricity_meter
+        row.keys_notes = req.keys_notes
+        row.items_json = persisted_items
+        row.updated_at = now
+        db.commit()
+    return {"status": "success", "id": insp_id, "updated_at": now, "items": persisted_items}
+
+
+@router.get("/api/inspections/{insp_id}/pdf")
+async def download_saved_inspection_pdf(insp_id: str):
+    from services.inspection_pdf import build_inspection_pdf
+
+    with SessionLocal() as db:
+        row = db.get(InspectionModel, insp_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Inspection not found")
+    payload = {
+        "property_address": row.property_address or "",
+        "landlord_or_agent": row.landlord_or_agent or "",
+        "lease_start_date": row.lease_start_date or "",
+        "water_meter": row.water_meter or "",
+        "electricity_meter": row.electricity_meter or "",
+        "keys_notes": row.keys_notes or "",
+        "items": row.items_json if isinstance(row.items_json, list) else [],
+    }
+    pdf_bytes = build_inspection_pdf(payload)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="homeseek-inspection-{insp_id}.pdf"'},
+    )
 
 
 @router.post("/api/inspections/pdf")
@@ -215,9 +378,11 @@ async def email_inspection_pdf(req: EmailInspectionPdfRequest):
 
 
 @router.post("/api/inspections/ai-describe")
-async def ai_describe_inspection_photo(req: AiDescribeSnagRequest):
+async def ai_describe_inspection_photo(req: AiDescribeSnagRequest, current_user: AuthUser = Depends(get_current_user)):
     if not req.photo_data or not req.photo_data.startswith("data:image/"):
         raise HTTPException(status_code=400, detail="Valid image data URL required.")
+    from core.credits import charge_credits, require_credits
+    require_credits(current_user.uid, "inspection_photo")
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         return {"status": "fallback", "description": req.existing_notes or "Pre-existing wear/condition documented on move-in.", "is_fallback": True}
@@ -236,7 +401,8 @@ async def ai_describe_inspection_photo(req: AiDescribeSnagRequest):
                 resp = await llm.ainvoke([HumanMessage(content=[{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": req.photo_data}}])])
                 txt = (resp.content if isinstance(resp.content, str) else str(resp.content)).strip()
                 if txt:
-                    return {"status": "success", "description": txt, "is_fallback": False}
+                    remaining = charge_credits(current_user.uid, "inspection_photo", {"room": req.room})
+                    return {"status": "success", "description": txt, "is_fallback": False, "ai_credits": remaining}
             except Exception as e:
                 err_str = str(e)
                 if any(k in err_str for k in ("RESOURCE_EXHAUSTED", "429", "402", "404", "NOT_FOUND", "503", "UNAVAILABLE")):
@@ -248,8 +414,10 @@ async def ai_describe_inspection_photo(req: AiDescribeSnagRequest):
 
 
 @router.post("/api/inspections/generate-criteria")
-async def generate_inspection_criteria(req: GenerateCriteriaRequest):
+async def generate_inspection_criteria(req: GenerateCriteriaRequest, current_user: AuthUser = Depends(get_current_user)):
     """Analyzes a Property24 link, listing ID, or pasted property details to build tailored move-in inspection criteria."""
+    from core.credits import charge_credits, require_credits
+    require_credits(current_user.uid, "inspection_criteria")
     import re
     raw_in = (req.property_input or "").strip()
     if not raw_in and not (req.property_address or "").strip():
@@ -324,7 +492,8 @@ Return STRICT JSON only (no markdown fences):
                     txt = re.sub(r"\s*```$", "", txt)
                     parsed = json.loads(txt)
                     if isinstance(parsed.get("rooms"), list) and parsed["rooms"]:
-                        return {"status": "success", "criteria": parsed, "is_fallback": False}
+                        remaining = charge_credits(current_user.uid, "inspection_criteria")
+                        return {"status": "success", "criteria": parsed, "is_fallback": False, "ai_credits": remaining}
                 except Exception as e:
                     err_str = str(e)
                     if any(k in err_str for k in ("RESOURCE_EXHAUSTED", "429", "402", "404", "NOT_FOUND", "503", "UNAVAILABLE")):

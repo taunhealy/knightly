@@ -26,9 +26,14 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 _DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "address_cache.db")
 
+
+def _get_conn():
+    from db.compat import get_compat_connection
+    return get_compat_connection(_DB_PATH)
+
+
 def _init_db():
-    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH)
+    conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS address_cache (
@@ -377,7 +382,7 @@ def normalize_address(raw_address: str, default_suburb: str = "") -> Dict[str, A
     }
 
 def get_cached_coordinates(raw_address: str, clean_query: str = "") -> Optional[Dict[str, Any]]:
-    conn = sqlite3.connect(_DB_PATH)
+    conn = _get_conn()
     cur = conn.cursor()
     cur.execute(
         "SELECT clean_query, suburb, is_withheld, lat, lng, confidence FROM address_cache WHERE raw_address = ? OR clean_query = ? LIMIT 1",
@@ -397,7 +402,7 @@ def get_cached_coordinates(raw_address: str, clean_query: str = "") -> Optional[
     return None
 
 def save_cached_coordinates(raw_address: str, clean_query: str, suburb: str, is_withheld: bool, lat: float, lng: float, confidence: str):
-    conn = sqlite3.connect(_DB_PATH)
+    conn = _get_conn()
     cur = conn.cursor()
     raw_hash = str(hash(raw_address))
     cur.execute("""
@@ -455,7 +460,7 @@ def _lookup_google_estate_cached(lat: float, lng: float) -> Dict[str, Any]:
     """Queries SQLite estate_cache first, then Google Maps Reverse Geocode & Places Nearby (cached permanently)."""
     coord_key = f"{round(float(lat), 4)},{round(float(lng), 4)}"
     try:
-        conn = sqlite3.connect(_DB_PATH)
+        conn = _get_conn()
         row = conn.execute(
             "SELECT is_security_estate, estate_name FROM estate_cache WHERE coord_key = ?",
             (coord_key,),
@@ -515,7 +520,7 @@ def _lookup_google_estate_cached(lat: float, lng: float) -> Dict[str, Any]:
             pass
 
     try:
-        conn = sqlite3.connect(_DB_PATH)
+        conn = _get_conn()
         conn.execute(
             "INSERT OR REPLACE INTO estate_cache (coord_key, is_security_estate, estate_name, updated_at) VALUES (?, ?, ?, ?)",
             (coord_key, 1 if is_est else 0, est_name, time.time()),

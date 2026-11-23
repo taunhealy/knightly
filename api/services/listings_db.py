@@ -7,11 +7,9 @@ from typing import List, Dict, Any, Optional
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "listings_pool.db")
 
-def _get_connection() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_connection():
+    from db.compat import get_compat_connection
+    return get_compat_connection(DB_PATH)
 
 def init_db():
     """Initializes the centralized listings pool SQLite database with indexes."""
@@ -444,6 +442,42 @@ def update_listing_address(
         )
         conn.commit()
         return {"status": "updated", "listing_id": row["id"], "item": raw}
+
+
+def update_listing_unit(
+    listing_id: str,
+    floor_number: str = "",
+    unit_number: str = "",
+) -> Dict[str, Any]:
+    """Saves user-contributed floor & apartment/unit number directly onto the listing record."""
+    lid = str(listing_id).strip()
+    raw_pid = lid.replace("p24-", "")
+    norm_lid = f"p24-{raw_pid}" if raw_pid.isdigit() else lid
+    now = time.time()
+    floor_clean = (floor_number or "").strip()[:32]
+    unit_clean = (unit_number or "").strip()[:32]
+
+    with _get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM listings WHERE id = ? OR p24_id = ? LIMIT 1",
+            (norm_lid, raw_pid),
+        ).fetchone()
+        if not row:
+            return {"status": "not_found"}
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+        except Exception:
+            raw = {}
+        if floor_clean:
+            raw["floor_number"] = floor_clean
+        if unit_clean:
+            raw["unit_number"] = unit_clean
+        conn.execute(
+            "UPDATE listings SET raw_json = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(raw), now, row["id"]),
+        )
+        conn.commit()
+        return {"status": "updated", "listing_id": row["id"], "floor_number": floor_clean, "unit_number": unit_clean}
 
 
 def update_listing_vision_attributes(

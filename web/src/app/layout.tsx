@@ -16,7 +16,7 @@ const serif = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "Home Seek | Real-Time Rental Sniper",
+  title: "Knightly | Real-Time Rental Sniper",
   description: "Advanced AI-powered rental tracking for South Africa. Get instant notifications for new listings on Property24, Facebook, and more.",
 };
 
