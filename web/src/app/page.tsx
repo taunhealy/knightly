@@ -17,7 +17,9 @@ import {
   DeviceMobile,
   Envelope,
   Lightning,
-  Sparkle
+  Sparkle,
+  Sun,
+  WarningCircle
 } from '@phosphor-icons/react';
 import { useAuth } from '@/lib/auth-context';
 import { Navbar } from '@/components/Navbar';
@@ -203,7 +205,7 @@ export default function Home() {
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           
           {/* Card 1 */}
           <div className="p-6 rounded-3xl border border-zinc-200 bg-white space-y-3 shadow-2xs hover:border-zinc-400 transition-all">
@@ -249,6 +251,28 @@ export default function Home() {
             </p>
           </div>
 
+          {/* Card 5 */}
+          <div className="p-6 rounded-3xl border border-zinc-200 bg-white space-y-3 shadow-2xs hover:border-zinc-400 transition-all">
+            <div className="w-10 h-10 rounded-2xl bg-amber-50 flex items-center justify-center text-amber-600 font-bold">
+              <Sun size={20} weight="bold" />
+            </div>
+            <h3 className="font-bold text-sm text-zinc-950">3D Sunlight Preview</h3>
+            <p className="text-xs text-zinc-600 leading-relaxed">
+              Simulate morning, midday, and afternoon sun paths and building shadows in 3D before booking a viewing.
+            </p>
+          </div>
+
+          {/* Card 6 */}
+          <div className="p-6 rounded-3xl border border-zinc-200 bg-white space-y-3 shadow-2xs hover:border-zinc-400 transition-all">
+            <div className="w-10 h-10 rounded-2xl bg-rose-50 flex items-center justify-center text-rose-600 font-bold">
+              <WarningCircle size={20} weight="bold" />
+            </div>
+            <h3 className="font-bold text-sm text-zinc-950">Agency Insight</h3>
+            <p className="text-xs text-zinc-600 leading-relaxed">
+              See which rental agencies have poor reviews, HelloPeter ratings, and deposit-dispute red flags before you apply.
+            </p>
+          </div>
+
         </div>
       </section>
 
@@ -275,10 +299,10 @@ export default function Home() {
               Compare Shortlisted Properties
             </Link>
             <Link
-              href="/alerts"
+              href="/inspection"
               className="px-6 py-3 bg-white border border-zinc-200 text-zinc-900 rounded-xl text-xs font-bold hover:bg-zinc-50 transition-colors"
             >
-              Manage Radar Alerts
+              Start Ingoing Inspection
             </Link>
           </div>
         </div>

@@ -32,6 +32,12 @@ class ForensicVisionRequest(BaseModel):
     uploaded_images: List[str] = []
     photo_source_mode: str = "both"
     personal_preferences: str = ""
+    force_refresh: bool = False
+
+
+class UpdatePrivacyRequest(BaseModel):
+    listing_id: str
+    dwelling_privacy: str
 
 
 _forensic_vision_cache: Dict[str, Dict[str, Any]] = {}
@@ -212,24 +218,72 @@ def _build_heuristic_vision_fallback(req: ForensicVisionRequest, clean_imgs: lis
         ),
     }
 
+@router.post("/api/listing/update-privacy")
+async def update_listing_privacy_override(req: UpdatePrivacyRequest):
+    """Allows a user to confirm or correct a listing's dwelling type / privacy classification publicly."""
+    allowed = ("apartment_block", "freestanding_house", "garden_cottage", "attached_flatlet", "room_shared", "independent")
+    if req.dwelling_privacy not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid dwelling_privacy value.")
+    is_shared = req.dwelling_privacy in ("garden_cottage", "attached_flatlet", "room_shared")
+    labels = {
+        "apartment_block": "Confirmed Apartment in multi-unit block (user verified).",
+        "freestanding_house": "Confirmed Private Standalone House (user verified).",
+        "garden_cottage": "Confirmed Garden Cottage on shared grounds (user verified).",
+        "attached_flatlet": "Confirmed Flatlet attached to main house (user verified).",
+        "room_shared": "Confirmed Shared House / Property (user verified).",
+        "independent": "Confirmed Independent Dwelling (user verified).",
+    }
+    verdict = labels[req.dwelling_privacy]
+    try:
+        from services.listings_db import update_listing_vision_attributes
+        from services.live_search import update_cached_listing_fields
+        update_listing_vision_attributes(
+            req.listing_id,
+            dwelling_privacy=req.dwelling_privacy,
+            is_landlord_on_site=is_shared,
+            vision_summary={"dwelling_privacy": req.dwelling_privacy, "privacy_verdict": verdict},
+        )
+        update_cached_listing_fields(req.listing_id, {
+            "dwelling_privacy": req.dwelling_privacy,
+            "is_landlord_on_site": is_shared,
+            "vision_verified": True,
+            "vision_privacy_verdict": verdict,
+        })
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to persist privacy update: {exc}")
+    return {
+        "status": "success",
+        "listing_id": req.listing_id,
+        "dwelling_privacy": req.dwelling_privacy,
+        "is_landlord_on_site": is_shared,
+        "privacy_verdict": verdict,
+    }
+
+
 @router.post("/api/listing/forensic-vision")
 async def listing_forensic_vision(req: ForensicVisionRequest, current_user: AuthUser = Depends(get_current_user)):
     """Inspects listing gallery photos + tenant-uploaded viewing/off-portal photos with Gemini Vision."""
     uploaded_imgs = [u for u in (req.uploaded_images or []) if isinstance(u, str) and u.startswith("data:image/")][:8]
     mode = (req.photo_source_mode or "both").lower()
-    cache_key = f"v3::{req.id or req.url}::{mode}::{len(uploaded_imgs)}::{req.personal_preferences.strip()[:80]}"
-    if not uploaded_imgs and cache_key in _forensic_vision_cache:
+    cache_key = f"v6::{req.id or req.url}::{mode}::{len(req.images or [])}::{len(uploaded_imgs)}::{req.personal_preferences.strip()[:80]}"
+    if not req.force_refresh and not uploaded_imgs and cache_key in _forensic_vision_cache:
         return {"status": "success", "vision": _forensic_vision_cache[cache_key], "cached": True}
 
-    if not uploaded_imgs:
+    if not req.force_refresh and not uploaded_imgs:
         try:
             from db.models import AiAnalysisModel
             from db.session import SessionLocal
+            from datetime import datetime as _dt
             with SessionLocal() as db:
                 cached_row = db.get(AiAnalysisModel, cache_key)
                 if cached_row and isinstance(cached_row.forensic_json, dict) and cached_row.forensic_json:
-                    _forensic_vision_cache[cache_key] = cached_row.forensic_json
-                    return {"status": "success", "vision": cached_row.forensic_json, "cached": True}
+                    cached_payload = dict(cached_row.forensic_json)
+                    if not cached_payload.get("generated_at") and cached_row.updated_at:
+                        cached_payload["generated_at"] = _dt.fromtimestamp(cached_row.updated_at).astimezone().strftime("%d %b %Y, %H:%M:%S")
+                    if not cached_payload.get("generated_at_ms") and cached_row.updated_at:
+                        cached_payload["generated_at_ms"] = int(cached_row.updated_at * 1000)
+                    _forensic_vision_cache[cache_key] = cached_payload
+                    return {"status": "success", "vision": cached_payload, "cached": True}
         except Exception:
             pass
 
@@ -306,7 +360,14 @@ Inspect the {len(image_contents)} attached listing photo(s) alongside the listin
 4. CEILING HEIGHT & VOLUME: Judge ceiling height (high >=2.8m vs standard 2.4m vs low <2.3m bulkheads) and flag 0.5x ultra-wide lens distortion.
 5. LIGHT FIXTURES & EVENING LIVABILITY: Distinguish layered warm lighting (downlights/sconces/under-cabinet) from harsh single central bulbs or windowless bathrooms.
 6. BUILDING EXTERIOR & BLOCK: If exterior/foyer is shown, note maintenance cues (peeling paint, rust streaks, gate/electric fence security, building era).
-7. SHARED ERF / ATTACHED DWELLING & DRIVEWAY CHECK: Look carefully at exterior, parking, doorway photos, AND what is visible THROUGH the windows, sliding doors, and balconies for signs of a subdivided house / attached flatlet / shared driveway (a main house or second roof visible right outside the window, overlooking neighbour/owner windows, tandem parking, side-passage entry, shared garden/pool, or "Wi-Fi included" at a single street-number address without a unit/complex number). Flag this explicitly in photo_cons, window_light_audit, and exterior_building_audit if suspected.
+7. DWELLING TYPE & PRIVACY CLASSIFICATION (OBJECTIVE SOUTH AFRICAN CONTEXT):
+   - In Cape Town (e.g. Hout Bay, Sea Point, Gardens, Muizenberg), many small apartment blocks, low-rise walk-ups, and terraced coastal flats have ground-floor unit doors opening directly onto an outdoor paved parking bay or open walkway rather than an internal lobby/corridor. Opening onto a paved parking area does NOT make an "Apartment" an attached flatlet!
+   - "apartment_block": An apartment or studio in a multi-unit residential block, low-rise complex, or terraced building (including ground-floor units opening onto shared complex parking bays/walkways). If the listing title says "Apartment" or "Studio" without "cottage/flatlet/house/separate entrance", and photos show apartment finishes + outdoor parking/view without a clear suburban main house/villa roofline sharing a domestic garden, prefer "apartment_block".
+   - "attached_flatlet": Only classify as attached_flatlet if photos/copy show it is visibly part of a single-family suburban house or villa (shared domestic roof, private house driveway/yard, or explicit wording like flatlet/separate entrance/wing of house).
+   - "garden_cottage": A detached cottage/granny flat on the same erf as a main residential house.
+   - "freestanding_house": A standalone house.
+   - "room_shared": Shared house/commune.
+   Set dwelling_privacy to "unknown" if exterior/context is genuinely ambiguous. Never assume an owner/landlord lives on-site unless exterior cues or copy actually show a single-family main house on the erf.
 
 LISTING DETAILS:
 - Title: {req.title}
@@ -329,7 +390,9 @@ Return STRICT JSON only (no markdown fences) with these exact keys:
   "exterior_building_audit": "1-2 concise sentences on what the exterior/era/security communicates (or note if exterior photo is missing).",
   "glazing": "1 concise sentence on windows, natural light, and outlook visible in the photos",
   "distortion": "1 concise sentence on camera focal length / ultra-wide 0.5x stretch vs true room proportions",
-  "stove_type": "gas | induction | electric | unknown"
+  "stove_type": "gas | induction | electric | unknown",
+  "dwelling_privacy": "apartment_block | freestanding_house | garden_cottage | attached_flatlet | room_shared | unknown",
+  "privacy_verdict": "1 concise sentence on what the photos reveal about privacy and dwelling type (e.g. apartment in a multi-unit block, cottage/flatlet attached to a main house, or standalone house)"
 }}"""
 
         models_to_try = ["gemini-4-neon", "gemini-3-flash-preview", "gemini-3.8-flash", "gemini-flash-latest"]
@@ -365,10 +428,14 @@ Return STRICT JSON only (no markdown fences) with these exact keys:
                 text = re.sub(r'^```(?:json)?\s*', '', text)
                 text = re.sub(r'\s*```$', '', text)
                 parsed = json_mod.loads(text)
+                import time as _t_now
+                from datetime import datetime as _dt
                 parsed["inspected_photo_count"] = len(image_contents)
                 parsed["building_intel"] = building_intel
                 parsed["is_fallback"] = False
                 parsed["model"] = m_name
+                parsed["generated_at"] = _dt.now().astimezone().strftime("%d %b %Y, %H:%M:%S")
+                parsed["generated_at_ms"] = int(_t_now.time() * 1000)
                 _forensic_vision_cache[cache_key] = parsed
                 if not uploaded_imgs:
                     try:
@@ -385,12 +452,29 @@ Return STRICT JSON only (no markdown fences) with these exact keys:
                             db.commit()
                     except Exception:
                         pass
-                if req.id and parsed.get("stove_type") in ("gas", "induction", "electric"):
+                valid_stove = parsed.get("stove_type") if parsed.get("stove_type") in ("gas", "induction", "electric") else None
+                valid_privacy = parsed.get("dwelling_privacy") if parsed.get("dwelling_privacy") in ("apartment_block", "freestanding_house", "garden_cottage", "attached_flatlet", "room_shared") else None
+                is_shared = valid_privacy in ("garden_cottage", "attached_flatlet", "room_shared") if valid_privacy else None
+                if req.id and (valid_stove or valid_privacy):
                     try:
                         from services.listings_db import update_listing_vision_attributes
                         from services.live_search import update_cached_listing_fields
-                        update_listing_vision_attributes(req.id, stove_type=parsed["stove_type"], vision_summary=parsed)
-                        update_cached_listing_fields(req.id, {"stove_type": parsed["stove_type"], "vision_verified": True})
+                        update_listing_vision_attributes(
+                            req.id,
+                            stove_type=valid_stove,
+                            dwelling_privacy=valid_privacy,
+                            is_landlord_on_site=is_shared,
+                            vision_summary=parsed,
+                        )
+                        cache_patch: Dict[str, Any] = {"vision_verified": True}
+                        if valid_stove:
+                            cache_patch["stove_type"] = valid_stove
+                        if valid_privacy:
+                            cache_patch["dwelling_privacy"] = valid_privacy
+                            cache_patch["is_landlord_on_site"] = bool(is_shared)
+                        if parsed.get("privacy_verdict"):
+                            cache_patch["vision_privacy_verdict"] = parsed["privacy_verdict"]
+                        update_cached_listing_fields(req.id, cache_patch)
                     except Exception:
                         pass
                 remaining = charge_credits(current_user.uid, "forensic_vision", {"listing_id": req.id})

@@ -94,36 +94,31 @@ class PropertyEvaluator:
 
     def extract_privacy_intel(self, listing: Dict[str, Any]) -> PrivacyIntel:
         """Deterministically inspects listing metadata & description for privacy boundaries."""
+        from services.listing_classifier import classify_privacy
+
         title = (listing.get("title") or "").lower()
         desc = (listing.get("description") or listing.get("raw_summary") or "").lower()
-        amenities = " ".join([str(a).lower() for a in listing.get("amenities", [])])
-        full_text = f"{title} {desc} {amenities}"
+        amenities = [str(a) for a in listing.get("amenities", [])]
+        full_text = f"{title} {desc} {' '.join(a.lower() for a in amenities)}"
 
-        dwelling_type = listing.get("dwelling_privacy") or "independent"
-        has_shared_entrance = bool(listing.get("has_shared_entrance", False))
-        has_shared_garden = bool(listing.get("has_shared_garden", False))
-        has_shared_pool = bool(listing.get("has_shared_pool", False))
-        is_landlord_on_site = bool(listing.get("is_landlord_on_site", False))
+        priv = classify_privacy(
+            title=listing.get("title") or "",
+            address=listing.get("address") or "",
+            description=listing.get("description") or listing.get("raw_summary") or "",
+            estate_name=listing.get("estate_name") or "",
+            amenities=amenities,
+            bedrooms=listing.get("bedrooms"),
+            is_security_estate=bool(listing.get("is_security_estate", False)),
+            existing_privacy=listing.get("dwelling_privacy"),
+            existing_landlord_on_site=listing.get("is_landlord_on_site"),
+            vision_verified=bool(listing.get("vision_verified", False)),
+        )
+        dwelling_type = priv["dwelling_privacy"]
+        has_shared_entrance = bool(listing.get("has_shared_entrance", False)) or priv["has_shared_entrance"]
+        has_shared_garden = bool(listing.get("has_shared_garden", False)) or priv["has_shared_garden"]
+        has_shared_pool = bool(listing.get("has_shared_pool", False)) or priv["has_shared_pool"]
+        is_landlord_on_site = priv["is_landlord_on_site"]
         privacy_flags = []
-
-        if any(k in full_text for k in ["room to let", "flatshare", "digs", "shared house", "shared apartment", "single room"]):
-            dwelling_type = "room_shared"
-        elif any(k in full_text for k in ["separate entrance", "attached flatlet", "wing of the house", "attached granny flat"]):
-            dwelling_type = "attached_flatlet"
-        elif any(k in full_text for k in ["nutec cottage", "garden cottage", "granny flat", "part of a larger property", "behind the main house", "set back from the main house", "dual living"]):
-            dwelling_type = "garden_cottage"
-
-        if any(k in full_text for k in ["shared entrance", "shared driveway", "shared gate", "driveway shared", "walk past main house"]) or dwelling_type in ["garden_cottage", "attached_flatlet"]:
-            has_shared_entrance = True
-
-        if any(k in full_text for k in ["shared garden", "communal garden", "shared yard", "communal yard", "shared grounds", "part of a larger property"]) or ("garden" in full_text and dwelling_type in ["garden_cottage", "attached_flatlet"]):
-            has_shared_garden = True
-
-        if any(k in full_text for k in ["shared pool", "communal pool", "heated pool", "owners discretion", "owner's discretion", "utilized at own"]):
-            has_shared_pool = True
-
-        if any(k in full_text for k in ["owner lives", "landlord lives", "owners discretion", "owner's discretion", "main house", "suit quiet tenant"]) and dwelling_type in ["garden_cottage", "attached_flatlet"]:
-            is_landlord_on_site = True
 
         if dwelling_type == "garden_cottage":
             privacy_flags.append("Garden Cottage on shared grounds with main house")

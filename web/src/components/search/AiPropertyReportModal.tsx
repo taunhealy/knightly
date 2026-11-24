@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowSquareOut,
   Camera,
@@ -77,6 +77,9 @@ export interface AiPropertyReportModalProps {
   resolveGoogleMapsUrl: (prop: any) => string;
   resolveProperty24Url: (prop: any) => string;
   openProperty24Url: (e: React.MouseEvent, url: string) => void;
+  reportHistory?: any[];
+  onSelectReportVersion?: (report: any) => void;
+  onOverrideDwellingPrivacy?: (propId: string, dwellingPrivacy: string) => void;
 }
 
 export const AiPropertyReportModal: React.FC<AiPropertyReportModalProps> = ({
@@ -129,14 +132,47 @@ export const AiPropertyReportModal: React.FC<AiPropertyReportModalProps> = ({
   resolveGoogleMapsUrl,
   resolveProperty24Url,
   openProperty24Url,
+  reportHistory = [],
+  onSelectReportVersion,
+  onOverrideDwellingPrivacy,
 }) => {
   const user = userEmail ? { email: userEmail } : null;
   const [chatByProp, setChatByProp] = useState<Record<string, Array<{ role: 'user' | 'assistant'; content: string }>>>({});
   const [chatInput, setChatInput] = useState('');
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [visionProgress, setVisionProgress] = useState(0);
+
+  const isVisionLoading = Boolean((viewingAiReportProp as any)?.deep_ai_audit?.isVisionLoading);
+
+  useEffect(() => {
+    if (!isVisionLoading) {
+      setVisionProgress(0);
+      return;
+    }
+    setVisionProgress(12);
+    const interval = setInterval(() => {
+      setVisionProgress((prev) => {
+        if (prev >= 94) return 94;
+        const step = prev < 40 ? 9 : prev < 72 ? 6 : 2;
+        return Math.min(94, prev + step);
+      });
+    }, 650);
+    return () => clearInterval(interval);
+  }, [isVisionLoading]);
 
   if (!viewingAiReportProp) return null;
+
+  const formatRelativeAge = (ms?: number): string | null => {
+    if (!ms || typeof ms !== 'number') return null;
+    const diffSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (diffSec < 45) return 'Just now';
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return `${Math.floor(diffSec / 86400)}d ago`;
+  };
+  const currentAudit = (viewingAiReportProp as any).deep_ai_audit;
+  const currentRelAge = formatRelativeAge(currentAudit?.generatedAtMs);
 
   const propIdKey = String(viewingAiReportProp.id || 'default');
   const chatMessages = chatByProp[propIdKey] || [];
@@ -238,16 +274,30 @@ export const AiPropertyReportModal: React.FC<AiPropertyReportModalProps> = ({
             </div>
 
             {/* Property Quick Summary Banner */}
-            <div className="p-3 rounded-2xl bg-zinc-50 border border-zinc-200/80 flex items-center gap-3">
+            <div className="p-3 rounded-2xl bg-zinc-50 border border-zinc-200/80 flex items-start gap-3">
               <img
                 src={viewingAiReportProp.image}
                 alt={viewingAiReportProp.title}
                 className="w-16 h-16 rounded-xl object-cover shrink-0 border border-zinc-200 shadow-2xs"
               />
               <div className="min-w-0 flex-1">
-                <h3 className="font-extrabold text-sm text-zinc-900 truncate">
-                  {viewingAiReportProp.title}
-                </h3>
+                <div className="flex items-start justify-between gap-2">
+                  <h3 className="font-extrabold text-sm text-zinc-900 truncate">
+                    {viewingAiReportProp.title}
+                  </h3>
+                  {viewingAiReportProp.url && (
+                    <a
+                      href={viewingAiReportProp.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-xl bg-zinc-900 hover:bg-indigo-600 text-white text-[11px] font-bold transition-colors"
+                      title="Open original listing on Property24"
+                    >
+                      <span>View listing on P24</span>
+                      <ArrowSquareOut size={12} weight="bold" />
+                    </a>
+                  )}
+                </div>
                 <p className="text-xs text-zinc-500 truncate">{viewingAiReportProp.address}</p>
                 <div className="flex items-center gap-2 mt-1">
                   <span className="text-xs font-black text-indigo-700">
@@ -533,13 +583,22 @@ export const AiPropertyReportModal: React.FC<AiPropertyReportModalProps> = ({
                   disabled={Boolean((viewingAiReportProp as any).deep_ai_audit?.isVisionLoading)}
                   className="px-3.5 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 active:scale-95 text-white text-xs font-black flex items-center gap-1.5 shadow-sm transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <Sparkle size={13} weight="fill" />
+                  {isVisionLoading ? (
+                    <CircleNotch size={13} weight="bold" className="animate-spin" />
+                  ) : (
+                    <Sparkle size={13} weight="fill" />
+                  )}
                   <span>
-                    {(viewingAiReportProp as any).deep_ai_audit?.isVisionLoading
-                      ? 'Analyzing Property...'
+                    {isVisionLoading
+                      ? `Analyzing Property (${visionProgress}%)…`
                       : 'Submit Preferences & Run AI Report'}
                   </span>
                 </button>
+                {currentAudit?.visionError && (
+                  <div className="w-full p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-bold">
+                    ⚠️ {currentAudit.visionError}
+                  </div>
+                )}
                 <div className="flex items-center flex-wrap gap-1">
                   {[
                     '☀️ North-Facing Sunlight',
@@ -585,98 +644,174 @@ export const AiPropertyReportModal: React.FC<AiPropertyReportModalProps> = ({
             <div className="pt-2">
               <div className="p-4 rounded-2xl bg-gradient-to-b from-purple-50/60 via-white to-white border-2 border-purple-200/90 shadow-md space-y-4">
                 {/* Formal Report Header */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-purple-100">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-xl bg-purple-700 text-white flex items-center justify-center shrink-0 shadow-xs">
-                      <Sparkle size={18} weight="fill" />
+                <div className="space-y-3 pb-3 border-b border-purple-100">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-purple-700 text-white flex items-center justify-center shrink-0 shadow-xs">
+                        <Sparkle size={18} weight="fill" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h3 className="text-sm font-black text-zinc-950 uppercase tracking-wide">
+                            AI Property Forensic Report
+                          </h3>
+                          {viewingAiReportProp.fit_score && (
+                            <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-purple-100 text-purple-900 border border-purple-200">
+                              {viewingAiReportProp.fit_score}% Fit
+                            </span>
+                          )}
+                          {(viewingAiReportProp as any).deep_ai_audit?.hasAiRun && (
+                            <span className="text-[9.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
+                              ✓ Verified Run
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-zinc-500 font-medium">
+                          Multimodal vision, acoustic decibel modeling &amp; lease audit.
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-sm font-black text-zinc-950 uppercase tracking-wide">
-                          AI Property Forensic Report
-                        </h3>
-                        {viewingAiReportProp.fit_score && (
-                          <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-purple-100 text-purple-900 border border-purple-200">
-                            {viewingAiReportProp.fit_score}% Fit
+
+                    {/* Prominent Report Timestamp Pill */}
+                    <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-purple-200/80 shadow-2xs self-start sm:self-auto shrink-0">
+                      <Clock size={13} weight="bold" className="text-purple-600 shrink-0" />
+                      <div className="text-[11px] leading-tight flex items-center gap-1.5 flex-wrap">
+                        <span className="font-extrabold text-zinc-900">
+                          {currentAudit?.generatedAt || 'Not yet run (Preview)'}
+                        </span>
+                        {currentRelAge && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-purple-100 text-purple-800 text-[9.5px] font-black">
+                            {currentRelAge}
                           </span>
                         )}
-                        {(viewingAiReportProp as any).deep_ai_audit?.hasAiRun && (
-                          <span className="text-[9.5px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
-                            ✓ Verified Run
+                        {currentAudit?.isCached && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-zinc-100 text-zinc-600 text-[9.5px] font-bold">
+                            Cached
                           </span>
                         )}
                       </div>
-                      <p className="text-[11px] text-zinc-500 font-medium">
-                        Autonomous multimodal vision, acoustic decibel modeling &amp; lease audit.
-                      </p>
                     </div>
                   </div>
 
-                  {/* Metadata Stamp (Time + Status) + Compare / Snag Export Actions */}
-                  <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => viewingAiReportProp && toggleCompareProperty(viewingAiReportProp)}
-                      className={`px-2.5 py-1 rounded-xl border text-[11px] font-black flex items-center gap-1 transition-colors cursor-pointer ${viewingAiReportProp && compareIds.includes(viewingAiReportProp.id)
-                          ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                          : 'bg-white border-zinc-200 text-zinc-700 hover:bg-purple-50 hover:border-purple-200'
-                        }`}
-                    >
-                      <Scales size={13} weight="bold" />
-                      <span>
-                        {viewingAiReportProp && compareIds.includes(viewingAiReportProp.id) ? '✓ In Compare' : '+ Compare'}
+                  {/* Multi-Report History Switcher */}
+                  {reportHistory.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap pt-1">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-purple-800 mr-1">
+                        Saved Runs ({reportHistory.length}):
                       </span>
-                    </button>
+                      {reportHistory.map((rep, idx) => {
+                        const isSelected =
+                          (currentAudit?.reportId && rep.reportId === currentAudit.reportId) ||
+                          (!currentAudit?.reportId && idx === 0 && currentAudit?.generatedAt === rep.generatedAt);
+                        const age = formatRelativeAge(rep.generatedAtMs);
+                        return (
+                          <button
+                            key={rep.reportId || `${rep.generatedAt}-${idx}`}
+                            type="button"
+                            onClick={() => onSelectReportVersion?.(rep)}
+                            className={`px-2.5 py-1 rounded-lg text-[10.5px] font-bold border transition-colors cursor-pointer flex items-center gap-1 ${
+                              isSelected
+                                ? 'bg-purple-700 text-white border-purple-700 shadow-2xs'
+                                : 'bg-white hover:bg-purple-50 text-zinc-700 border-zinc-200'
+                            }`}
+                          >
+                            <span>{idx === 0 ? 'Latest' : `#${reportHistory.length - idx}`}</span>
+                            <span>· {rep.generatedAt}</span>
+                            {age && <span className={isSelected ? 'text-purple-200' : 'text-zinc-400'}>({age})</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
 
-                    {compareIds.length >= 2 && (
-                      <a
-                        href="/compare"
-                        className="px-2.5 py-1 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-[11px] font-black transition-colors"
+                  {/* Clean Segmented Action Toolbar */}
+                  <div className="flex items-center justify-between gap-2 flex-wrap pt-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => viewingAiReportProp && toggleCompareProperty(viewingAiReportProp)}
+                        className={`px-3 py-1.5 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${viewingAiReportProp && compareIds.includes(viewingAiReportProp.id)
+                            ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
+                            : 'bg-white border-zinc-200 text-zinc-700 hover:bg-purple-50 hover:border-purple-200'
+                          }`}
                       >
-                        Open Compare ({compareIds.length}) →
-                      </a>
-                    )}
+                        <Scales size={13} weight="bold" />
+                        <span>
+                          {viewingAiReportProp && compareIds.includes(viewingAiReportProp.id) ? 'In Compare' : 'Compare'}
+                        </span>
+                      </button>
 
-                    <button
-                      type="button"
-                      onClick={() => viewingAiReportProp && handleCopySnagReport(viewingAiReportProp)}
-                      className="px-2.5 py-1 rounded-xl bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 text-[11px] font-bold transition-colors cursor-pointer"
-                      title="Copy formatted viewing / move-in snag checklist"
-                    >
-                      {snagCopied ? '✓ Snag Copied' : 'Copy Snag Report'}
-                    </button>
+                      {compareIds.length >= 2 && (
+                        <a
+                          href="/compare"
+                          className="px-3 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-[11px] font-bold transition-colors"
+                        >
+                          Open Compare ({compareIds.length}) →
+                        </a>
+                      )}
 
-                    <button
-                      type="button"
-                      disabled={isExportingPdf}
-                      onClick={() => viewingAiReportProp && handleDownloadReportPdf(viewingAiReportProp)}
-                      className="px-2.5 py-1 rounded-xl bg-zinc-900 hover:bg-indigo-600 disabled:opacity-50 text-white text-[11px] font-bold transition-colors cursor-pointer"
-                      title="Download this report as a PDF"
-                    >
-                      {isExportingPdf ? 'Generating...' : '📄 Save PDF'}
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => viewingAiReportProp && handleCopySnagReport(viewingAiReportProp)}
+                        className="px-3 py-1.5 rounded-xl bg-white hover:bg-zinc-50 border border-zinc-200 text-zinc-700 text-[11px] font-bold transition-colors cursor-pointer"
+                        title="Copy formatted viewing / move-in snag checklist"
+                      >
+                        {snagCopied ? '✓ Snag Copied' : 'Copy Snag Checklist'}
+                      </button>
+                    </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsEmailPdfOpen(!isEmailPdfOpen);
-                        setEmailPdfStatus(null);
-                        if (!emailPdfTarget && user?.email) setEmailPdfTarget(user.email);
-                      }}
-                      className="px-2.5 py-1 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-800 text-[11px] font-bold transition-colors cursor-pointer"
-                      title="Email this PDF report to an email address"
-                    >
-                      ✉️ Email PDF
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isExportingPdf}
+                        onClick={() => viewingAiReportProp && handleDownloadReportPdf(viewingAiReportProp)}
+                        className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-indigo-600 disabled:opacity-50 text-white text-[11px] font-bold transition-colors cursor-pointer"
+                        title="Download this report as a PDF"
+                      >
+                        {isExportingPdf ? 'Generating PDF...' : 'Save PDF'}
+                      </button>
 
-                    <div className="flex items-center gap-2 text-[11px] text-zinc-500 font-semibold bg-white px-2.5 py-1 rounded-xl border border-zinc-200 shadow-2xs">
-                      <Clock size={13} weight="bold" className="text-purple-600" />
-                      <span>
-                        Generated: {(viewingAiReportProp as any).deep_ai_audit?.generatedAt || 'Standby (Pending Submission)'}
-                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsEmailPdfOpen(!isEmailPdfOpen);
+                          setEmailPdfStatus(null);
+                          if (!emailPdfTarget && user?.email) setEmailPdfTarget(user.email);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-800 text-[11px] font-bold transition-colors cursor-pointer"
+                        title="Email this PDF report to an email address"
+                      >
+                        Email PDF
+                      </button>
                     </div>
                   </div>
                 </div>
+
+                {isVisionLoading && (
+                  <div className="p-3.5 rounded-2xl bg-indigo-50/80 border border-indigo-200 space-y-2 animate-in fade-in duration-150">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 font-extrabold text-indigo-950">
+                        <CircleNotch size={15} weight="bold" className="animate-spin text-indigo-600 shrink-0" />
+                        <span>
+                          {visionProgress < 30
+                            ? 'Fetching listing photo gallery & full description…'
+                            : visionProgress < 60
+                              ? 'Inspecting interior & exterior photos with AI Vision…'
+                              : visionProgress < 85
+                                ? 'Determining dwelling type, privacy & WFH layout…'
+                                : 'Scoring pros, cons & saving timestamped report…'}
+                        </span>
+                      </div>
+                      <span className="font-black text-indigo-700 tabular-nums shrink-0">{visionProgress}%</span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-indigo-100 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-indigo-600 via-purple-600 to-fuchsia-500 transition-all duration-500 ease-out"
+                        style={{ width: `${visionProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {isEmailPdfOpen && viewingAiReportProp && (
                   <div className="p-3 rounded-2xl bg-indigo-50/70 border border-indigo-200 flex flex-wrap items-center gap-2">
@@ -1250,6 +1385,56 @@ export const AiPropertyReportModal: React.FC<AiPropertyReportModalProps> = ({
                   })()}
 
                   <div className="space-y-2 text-xs">
+                    {/* Dwelling Type & Privacy Inspection */}
+                    <div className="flex items-start gap-2.5 p-2.5 rounded-xl bg-white border border-zinc-200/70">
+                      <span className="text-base leading-none mt-0.5">🏡</span>
+                      <div className="min-w-0 flex-1 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="font-extrabold text-zinc-900 text-[11px]">
+                            Dwelling Type &amp; Privacy Check
+                          </div>
+                          {currentAudit?.visionError && (
+                            <span className="text-[10px] font-bold text-rose-600">
+                              {currentAudit.visionError}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-zinc-600">
+                          {(viewingAiReportProp as any).deep_ai_audit?.privacyVerdict ||
+                            (viewingAiReportProp as any).deep_ai_audit?.visionReport?.privacy_verdict ||
+                            (viewingAiReportProp as any).vision_privacy_verdict ||
+                            getDwellingPrivacyInfo(viewingAiReportProp).aiInsightNote}
+                        </div>
+                        {onOverrideDwellingPrivacy && (
+                          <div className="flex items-center gap-1 flex-wrap pt-0.5">
+                            <span className="text-[9.5px] font-bold text-zinc-400 mr-1">Correct type:</span>
+                            {[
+                              { id: 'apartment_block', label: 'Apartment Block' },
+                              { id: 'freestanding_house', label: 'Standalone House' },
+                              { id: 'attached_flatlet', label: 'Attached Flatlet' },
+                              { id: 'garden_cottage', label: 'Garden Cottage' },
+                            ].map((opt) => {
+                              const active = viewingAiReportProp.dwelling_privacy === opt.id;
+                              return (
+                                <button
+                                  key={opt.id}
+                                  type="button"
+                                  onClick={() => onOverrideDwellingPrivacy(viewingAiReportProp.id, opt.id)}
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold border transition-colors cursor-pointer ${
+                                    active
+                                      ? 'bg-indigo-600 text-white border-indigo-600'
+                                      : 'bg-zinc-50 hover:bg-indigo-50 text-zinc-700 border-zinc-200'
+                                  }`}
+                                >
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
                     {/* Stove Inspection */}
                     <div className="flex items-start gap-2.5 p-2 rounded-xl bg-white border border-zinc-200/70">
                       <span className="text-base leading-none mt-0.5">🍳</span>

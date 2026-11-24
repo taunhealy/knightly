@@ -159,7 +159,7 @@ export default function ProfilePage() {
           className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/10 text-xs font-bold flex items-center gap-1.5 transition-colors"
         >
           <MagnifyingGlass size={14} weight="bold" className="text-indigo-400" />
-          <span>Back to Search Radar</span>
+          <span>Back to Search Map</span>
         </Link>
       </div>
 

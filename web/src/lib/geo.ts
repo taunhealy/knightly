@@ -566,7 +566,7 @@ export interface DwellingPrivacyInfo {
   isExplicitLandlord: boolean;
   isSecondaryDwelling: boolean;
   isPossibleSharedProperty?: boolean;
-  dwellingType: 'explicit_landlord' | 'garden_cottage' | 'flatlet' | 'shared_property' | 'possible_shared' | 'independent';
+  dwellingType: 'explicit_landlord' | 'garden_cottage' | 'flatlet' | 'shared_property' | 'possible_shared' | 'apartment_block' | 'independent';
   badgeLabel: string | null;
   shortFlag: string | null;
   aiInsightNote: string;
@@ -599,15 +599,9 @@ export function getDwellingPrivacyInfo(prop: {
     prop.title || '',
     prop.address || '',
     prop.suburb || '',
+    prop.estate_name || '',
     prop.description || '',
   ].join(' ').toLowerCase();
-
-  // 1. Explicit landlord / owner residing on-site (ignore negated phrases like "no landlord on-site")
-  const textWithoutNegatedLandlord = fullText.replace(/\b(?:no|not|zero|without)\s+(?:landlord|owner)\s+(?:on[- ]?site|residing)\b/gi, '');
-  const isExplicitLandlord =
-    prop.is_landlord_on_site === true ||
-    prop.dwelling_privacy === 'landlord_on_site' ||
-    /\b(landlord lives|owner lives|landlord resides|owner resides|landlord on site|landlord on-site|owner on site|owner on-site|on owners? property|on landlords? property|suit quiet tenant as owner|main house occupied by owner|share with owner)\b/i.test(textWithoutNegatedLandlord);
 
   // 2. Garden cottage
   const isGardenCottage =
@@ -625,7 +619,17 @@ export function getDwellingPrivacyInfo(prop: {
     /\b(shared property|behind the main house|behind main house|attached to main house|shared yard|shared garden|shared gate|shared driveway|dual living)\b/i.test(fullText);
 
   const isSecondaryDwelling = isGardenCottage || isFlatlet || isSharedGrounds;
+
+  // 1. Explicit landlord / owner residing on-site (only override when not already classified as a specific cottage/flatlet)
+  const textWithoutNegatedLandlord = fullText.replace(/\b(?:no|not|zero|without)\s+(?:landlord|owner)\s+(?:on[- ]?site|residing)\b/gi, '');
+  const isExplicitLandlord =
+    prop.dwelling_privacy === 'landlord_on_site' ||
+    /\b(landlord lives|owner lives|landlord resides|owner resides|landlord on site|landlord on-site|owner on site|owner on-site|on owners? property|on landlords? property|suit quiet tenant as owner|main house occupied by owner|share with owner)\b/i.test(textWithoutNegatedLandlord) ||
+    (prop.is_landlord_on_site === true && !isSecondaryDwelling && prop.dwelling_privacy !== 'apartment_block' && prop.dwelling_privacy !== 'freestanding_house');
+
   const isLandlordOnSite = isExplicitLandlord || isSecondaryDwelling;
+
+  const visionTag = prop.vision_verified && prop.dwelling_privacy ? ' (AI Vision verified)' : '';
 
   if (isExplicitLandlord) {
     return {
@@ -635,7 +639,7 @@ export function getDwellingPrivacyInfo(prop: {
       dwellingType: 'explicit_landlord',
       badgeLabel: '⚠️ Landlord On-Site',
       shortFlag: 'Landlord On-Site',
-      aiInsightNote: '⚠️ Verified landlord / owner residing on property',
+      aiInsightNote: `⚠️ Verified landlord / owner residing on property${visionTag}`,
     };
   }
 
@@ -647,7 +651,7 @@ export function getDwellingPrivacyInfo(prop: {
       dwellingType: 'garden_cottage',
       badgeLabel: '🏡 Garden Cottage (Shared Grounds)',
       shortFlag: 'Garden Cottage',
-      aiInsightNote: '🏡 Garden cottage on shared property (likely owner on-site)',
+      aiInsightNote: `🏡 Garden cottage on shared property (likely owner on-site)${visionTag}`,
     };
   }
 
@@ -657,9 +661,9 @@ export function getDwellingPrivacyInfo(prop: {
       isExplicitLandlord: false,
       isSecondaryDwelling: true,
       dwellingType: 'flatlet',
-      badgeLabel: '🏡 Flatlet (Shared Property)',
-      shortFlag: 'Flatlet',
-      aiInsightNote: '🏡 Flatlet / separate entrance on shared property',
+      badgeLabel: '🏡 Flatlet (Attached to House)',
+      shortFlag: 'Attached Flatlet',
+      aiInsightNote: `🏡 Flatlet / apartment attached to house (shared property)${visionTag}`,
     };
   }
 
@@ -671,7 +675,7 @@ export function getDwellingPrivacyInfo(prop: {
       dwellingType: 'shared_property',
       badgeLabel: '⚠️ Shared Property',
       shortFlag: 'Shared Property',
-      aiInsightNote: '⚠️ Shared grounds / secondary dwelling',
+      aiInsightNote: `⚠️ Shared grounds / secondary dwelling${visionTag}`,
     };
   }
 
@@ -681,10 +685,37 @@ export function getDwellingPrivacyInfo(prop: {
   const isStudioOrOneBed = bedsVal <= 1 || /\b(studio|bachelor|0\.5\s*bed)\b/i.test(fullText);
   const hasStreetNumberAddress = /^\d{1,4}\s+[a-z]/i.test(rawAddress);
   const hasApartmentBlockSignal =
+    prop.dwelling_privacy === 'apartment_block' ||
     /\b(unit\s*\d+|apt\s*\d+|apartment\s*building|apartment\s*block|sectional\s*title|heights|towers|court|manor|mews|villas|terraces|residences|block\s+[a-z0-9])\b/i.test(fullText);
+
+  if (hasApartmentBlockSignal) {
+    return {
+      isLandlordOnSite: false,
+      isExplicitLandlord: false,
+      isSecondaryDwelling: false,
+      dwellingType: 'apartment_block',
+      badgeLabel: '🏢 Apartment in Block',
+      shortFlag: 'Apartment Block',
+      aiInsightNote: `🏢 Apartment in multi-unit block${visionTag}`,
+    };
+  }
+
+  if (prop.vision_verified && prop.dwelling_privacy === 'freestanding_house') {
+    return {
+      isLandlordOnSite: false,
+      isExplicitLandlord: false,
+      isSecondaryDwelling: false,
+      dwellingType: 'independent',
+      badgeLabel: '🏡 Standalone House (AI Verified)',
+      shortFlag: 'Standalone House',
+      aiInsightNote: `🛡️ Private Standalone House${visionTag}`,
+    };
+  }
+
   const hasSharedUtilityTell =
-    /\b(wi-?fi\s+included|wifi\s+incl|internet\s+included)\b/i.test(fullText) ||
-    (/\b(security\s+estate|gated\s+estate)\b/i.test(fullText) && isStudioOrOneBed);
+    Boolean(prop.is_security_estate) ||
+    /\b(wi-?fi\s+included|wifi\s+incl|internet\s+included|security\s+estate|gated\s+estate|three-bedroom\s+villa|family\s+home)\b/i.test(fullText) ||
+    (isStudioOrOneBed && hasStreetNumberAddress && !hasApartmentBlockSignal);
 
   if (isStudioOrOneBed && hasStreetNumberAddress && !hasApartmentBlockSignal && hasSharedUtilityTell) {
     return {
@@ -706,7 +737,9 @@ export function getDwellingPrivacyInfo(prop: {
     dwellingType: 'independent',
     badgeLabel: null,
     shortFlag: null,
-    aiInsightNote: '🛡️ 100% Private Standalone',
+    aiInsightNote: prop.dwelling_privacy === 'freestanding_house'
+      ? `🛡️ Private Standalone House${visionTag}`
+      : `🛡️ 100% Private Standalone${visionTag}`,
   };
 }
 

@@ -68,9 +68,8 @@ async def login_user_endpoint(payload: AuthCredentialsPayload):
 @router.put("/api/user-profile/{user_id}/settings")
 async def update_user_profile_settings(user_id: str, payload: ProfileSettingsPayload):
     from services.community_db import update_user_community_profile
-    from core.firebase_client import get_effective_user_id
 
-    effective_id = get_effective_user_id(user_id, _DEFAULT_DUMMY_UID)
+    effective_id = str(user_id or "").strip() or "local-dev-user"
     res = update_user_community_profile(
         effective_id,
         nickname=payload.nickname,
@@ -199,9 +198,9 @@ async def get_all_comment_counts():
 
 
 @router.get("/api/listings/nickname/{user_id}")
-async def get_user_nickname_endpoint(user_id: str):
+async def get_user_nickname_endpoint(user_id: str, email: Optional[str] = None):
     from services.community_db import get_or_create_nickname
-    return {"user_id": user_id, "nickname": get_or_create_nickname(user_id)}
+    return {"user_id": user_id, "nickname": get_or_create_nickname(user_id, email=email)}
 
 
 @router.post("/api/listings/submit-unit")

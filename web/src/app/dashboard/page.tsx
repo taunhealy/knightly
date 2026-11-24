@@ -10,7 +10,7 @@ export default function DashboardRedirectPage() {
 
   useEffect(() => {
     if (loading) return;
-    router.replace(user ? '/alerts' : '/');
+    router.replace(user ? '/search' : '/');
   }, [user, loading, router]);
 
   return (

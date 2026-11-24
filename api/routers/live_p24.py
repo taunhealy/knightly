@@ -259,35 +259,52 @@ async def get_listing_photos(url: str):
         if clean_photos:
             _listing_photos_cache[url] = clean_photos[:24]
 
-        # Extract full description features (garage, secure parking bay, stove, inverter, pet_friendly)
+        # Extract full description features & privacy via unified listing_classifier
         html_lower = html.lower()
         from bs4 import BeautifulSoup
+        from services.listing_classifier import classify_listing_features, classify_privacy
+
         soup = BeautifulSoup(html, "html.parser")
         desc_el = soup.find(class_=re.compile(r"p24_description|js_readMoreText|p24_features|p24_keyFeatures", re.I))
-        desc_text = desc_el.get_text(" ", strip=True).lower() if desc_el else html_lower
+        desc_text = desc_el.get_text(" ", strip=True) if desc_el else ""
+        full_desc = desc_text[:2000]
 
-        has_garage = bool(re.search(r"\b(?:garage|garages|lock-up|lock\s+up\s+garage|automated\s+garage|single\s+garage|double\s+garage)\b", desc_text))
-        has_secure_bay = bool(re.search(r"\b(?:secure\s+parking(?:\s+bay)?|parking\s+bay|off-street\s+parking|off\s+street\s+parking|undercover\s+parking|basement\s+parking|allocated\s+(?:parking|bay)|shaded\s+parking|carport|vehicular\s+access(?:\s+driveway)?|sliding\s+gate\s+vehicular\s+access|remote\s+controlled\s+(?:sliding\s+)?gate\s+(?:vehicular\s+)?access|parking\s+behind\s+gate|secure\s+off-street)\b", desc_text))
-        parking_type = "garage" if has_garage else ("secure_bay" if has_secure_bay else None)
-        stove_type = "gas" if any(k in desc_text for k in ["gas hob", "gas stove", "gas cooker", "gas burner"]) else (
-            "induction" if any(k in desc_text for k in ["induction hob", "induction stove"]) else None
+        feats = classify_listing_features(text=desc_text or html_lower)
+        has_garage = bool(feats["has_garage"])
+        has_secure_bay = bool(feats["has_secure_bay"])
+        parking_type = feats["parking_type"] if feats["parking_type"] != "none" else None
+        stove_type = feats["stove_type"] if feats["stove_type"] in ("gas", "induction") else None
+        has_inverter = bool(feats["has_inverter"])
+        pet_friendly = feats["pet_friendly"]
+        is_security_estate = bool(feats["is_security_estate"])
+
+        priv = classify_privacy(
+            description=desc_text or html_lower,
+            is_security_estate=is_security_estate,
         )
-        has_inverter = bool(re.search(r"\b(?:inverter|solar|backup|ups|load shedding)\b", desc_text))
-        pet_friendly = True if re.search(r"\b(?:pet friendly|pets allowed|pets welcome|dogs allowed|cats allowed)\b", desc_text) else None
-        is_security_estate = bool(re.search(r"\b(?:security\s+estate|gated\s+estate|gated\s+community|eco\s+estate|24.?h(?:our)?\s+security|manned\s+gate|boom\s+gate|biometric)\b", desc_text))
-        full_desc = desc_el.get_text(" ", strip=True)[:2000] if desc_el else ""
-        if is_security_estate or full_desc:
+
+        pid_match = re.search(r"/(\d{6,12})(?:[/?#]|$)", clean_url)
+        if pid_match:
             try:
                 from services.live_search import update_cached_listing_fields
-                pid_match = re.search(r"/(\d{6,12})(?:[/?#]|$)", clean_url)
-                if pid_match:
-                    patch_fields = {}
-                    if is_security_estate:
-                        patch_fields["is_security_estate"] = True
-                    if full_desc:
-                        patch_fields["description"] = full_desc
-                    if patch_fields:
-                        update_cached_listing_fields(pid_match.group(1), patch_fields)
+                from services.listings_db import update_listing_detail_fields
+
+                patch_fields = {
+                    "has_garage": has_garage or None,
+                    "has_secure_bay": has_secure_bay or None,
+                    "parking_type": parking_type,
+                    "stove_type": stove_type,
+                    "has_inverter": has_inverter or None,
+                    "pet_friendly": pet_friendly,
+                    "is_security_estate": is_security_estate or None,
+                    "description": full_desc or None,
+                    "dwelling_privacy": priv["dwelling_privacy"] if priv["dwelling_privacy"] != "independent" else None,
+                    "is_landlord_on_site": True if priv["is_landlord_on_site"] else None,
+                }
+                clean_patch = {k: v for k, v in patch_fields.items() if v is not None}
+                if clean_patch:
+                    update_cached_listing_fields(pid_match.group(1), clean_patch)
+                    update_listing_detail_fields(pid_match.group(1), clean_patch)
             except Exception:
                 pass
 
@@ -297,7 +314,8 @@ async def get_listing_photos(url: str):
             from services.live_search import _extract_agency_from_html
             from services.agency_reputation import lookup_agency_reputation
             raw_ag = _extract_agency_from_html(html)
-            if not raw_ag and ("liesl and giselle" in desc_text or "liesl or giselle" in desc_text):
+            desc_lower = (desc_text or html_lower).lower()
+            if not raw_ag and ("liesl and giselle" in desc_lower or "liesl or giselle" in desc_lower):
                 raw_ag = "Progressive Housing Investments"
             if raw_ag:
                 rep = lookup_agency_reputation(raw_ag)
@@ -325,6 +343,8 @@ async def get_listing_photos(url: str):
                 "has_inverter": has_inverter,
                 "pet_friendly": pet_friendly,
                 "is_security_estate": is_security_estate,
+                "dwelling_privacy": priv["dwelling_privacy"],
+                "is_landlord_on_site": priv["is_landlord_on_site"],
                 "description": full_desc,
                 **agency_info,
             },

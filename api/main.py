@@ -140,11 +140,12 @@ def verify_user_match(requested_id: str, uid: str = None):
             detail="Forbidden: Identity mismatch."
         )
 
-def get_effective_user_id(requested_id: str, uid: str = "R4R2k7z2XAQGgRjB57ctZcOkEbp2") -> str:
-    """Translates incoming requests to the primary identity (v45.0)."""
-    if uid == "R4R2k7z2XAQGgRjB57ctZcOkEbp2":
-        return "taun_test_user"
-    return requested_id
+def get_effective_user_id(requested_id: str, uid: str = "") -> str:
+    """Resolve incoming user ID without overwriting authenticated users."""
+    clean = str(requested_id or "").strip()
+    if clean:
+        return clean
+    return str(uid or "").strip() or "local-dev-user"
 
 @app.on_event("startup")
 async def on_startup():
@@ -160,21 +161,19 @@ async def on_shutdown():
 
 @app.get("/user-profile/{user_id}")
 async def fetch_user_profile(user_id: str):
-    # LOCAL: We default to the master tester UID for dev convenience
-    dummy_uid = "R4R2k7z2XAQGgRjB57ctZcOkEbp2" 
-    effective_id = get_effective_user_id(user_id, dummy_uid)
+    effective_id = get_effective_user_id(user_id)
     profile = await get_user_profile(effective_id)
     if "pro_credits" not in profile:
-        profile["pro_credits"] = 5
+        profile["pro_credits"] = 0
     try:
         from services.community_db import get_user_community_profile
-        cprof = get_user_community_profile(effective_id)
+        cprof = get_user_community_profile(effective_id, email=profile.get("email") or None)
         profile["nickname"] = cprof.get("nickname")
         if cprof.get("avatar_url"):
             profile["avatar_url"] = cprof["avatar_url"]
     except Exception:
         pass
-    return {**profile, "id": user_id}
+    return {**profile, "id": effective_id}
 
 @app.get("/listings/{user_id}")
 async def fetch_user_listings(user_id: str):

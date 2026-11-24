@@ -193,33 +193,20 @@ def parse_p24_card(card: Dict[str, Any], default_suburb: Optional[str] = None) -
     if re.search(r"\b(?:room to let|flatshare|digs|shared apartment|single room)\b", f"{title} {full_text}", re.I):
         sub_type = "Shared"
 
-    # 11b. Privacy & Living Setup Detection
-    dwelling_privacy = "independent"
-    has_shared_entrance = False
-    has_shared_garden = False
-    has_shared_pool = False
-    is_landlord_on_site = False
+    # 11b. Privacy & Living Setup Detection (shared classifier)
+    from services.listing_classifier import classify_listing_features, classify_privacy
 
-    combined_text = f"{title} {excerpt} {full_text}".lower()
-
-    if re.search(r"\b(?:room to let|flatshare|digs|shared house|shared apartment|single room)\b", combined_text):
-        dwelling_privacy = "room_shared"
-    elif re.search(r"\b(?:separate entrance|attached flatlet|wing of the house|attached granny flat)\b", combined_text):
-        dwelling_privacy = "attached_flatlet"
-    elif re.search(r"\b(?:cottage|garden cottage|nutec cottage|granny flat|part of a larger property|behind the main house|set back from the main house|dual living)\b", combined_text):
-        dwelling_privacy = "garden_cottage"
-
-    if re.search(r"\b(?:shared entrance|shared driveway|shared gate|driveway shared|communal entrance)\b", combined_text) or dwelling_privacy in ["garden_cottage", "attached_flatlet"]:
-        has_shared_entrance = True
-
-    if (re.search(r"\b(?:shared garden|communal garden|shared yard|communal yard|shared grounds|part of a larger property)\b", combined_text) or "garden" in combined_text) and dwelling_privacy in ["garden_cottage", "attached_flatlet"]:
-        has_shared_garden = True
-
-    if re.search(r"\b(?:shared pool|communal pool|heated pool|pool.*(?:owners? discretion|shared|utilized))\b", combined_text):
-        has_shared_pool = True
-
-    if re.search(r"\b(?:owner lives|landlord lives|owners? discretion|main house|suit quiet tenant)\b", combined_text) and dwelling_privacy in ["garden_cottage", "attached_flatlet"]:
-        is_landlord_on_site = True
+    priv = classify_privacy(
+        title=title,
+        address=address,
+        description=f"{excerpt} {full_text}",
+        bedrooms=beds,
+    )
+    dwelling_privacy = priv["dwelling_privacy"]
+    has_shared_entrance = priv["has_shared_entrance"]
+    has_shared_garden = priv["has_shared_garden"]
+    has_shared_pool = priv["has_shared_pool"]
+    is_landlord_on_site = priv["is_landlord_on_site"]
 
     # 12. View Category
     view_cat = "Other"
@@ -229,18 +216,17 @@ def parse_p24_card(card: Dict[str, Any], default_suburb: Optional[str] = None) -
         view_cat = "Mountain"
 
     # 12b. Structured Feature Attributes (Stove, Garage, Inverter, Fibre)
-    stove_type = "electric"
-    if re.search(r"\b(?:gas hob|gas stove|gas cooker|gas plates)\b", combined_text):
-        stove_type = "gas"
-    elif re.search(r"\b(?:induction hob|induction stove)\b", combined_text):
-        stove_type = "induction"
-    elif re.search(r"\bgas\b", combined_text) and any(w in combined_text for w in ["hob", "stove", "cook"]):
-        stove_type = "gas"
-
-    has_garage = bool(re.search(r"\b(?:garage|lock-up|automated garage|double garage|single garage)\b", combined_text))
-    parking_type = "garage" if has_garage else ("secure_bay" if re.search(r"\b(?:parking|bay|covered parking|secure bay|basement)\b", combined_text) else "none")
-    fibre_ready = bool(re.search(r"\b(?:fibre|fiber|high speed internet|wifi ready|wi-fi ready)\b", combined_text)) or True
-    has_inverter = bool(re.search(r"\b(?:inverter|solar|backup battery|battery backup|load shedding backup|ups)\b", combined_text))
+    feats = classify_listing_features(
+        text=f"{excerpt} {full_text}",
+        title=title,
+        address=address,
+        pkg_cnt=1 if re.search(r"\b(?:parking|garage|bay)\b", full_text, re.I) else 0,
+    )
+    stove_type = feats["stove_type"]
+    has_garage = feats["has_garage"]
+    parking_type = feats["parking_type"]
+    fibre_ready = feats["fibre_ready"] or True
+    has_inverter = feats["has_inverter"]
 
     # 13. Agency & Landlord Intelligence
     agency_raw = (

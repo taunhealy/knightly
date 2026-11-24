@@ -800,6 +800,70 @@ export const PropertyMap: React.FC<PropertyMapProps> = ({
     return result;
   }, [mappableProperties, properties, selectedPropertyId, hoveredProperty, center, zoom, dimensions, activeAnchor]);
 
+  // Off-screen directional edge shortcut pills (arrow + price + distance)
+  const offScreenShortcuts = React.useMemo(() => {
+    if (dimensions.width < 220 || dimensions.height < 220) return [];
+    const cx = dimensions.width / 2;
+    const cy = dimensions.height / 2;
+    const padX = 68;
+    const padTop = 76;
+    const padBottom = 88;
+    const halfW = Math.max(40, cx - padX);
+    const halfHTop = Math.max(40, cy - padTop);
+    const halfHBottom = Math.max(40, cy - padBottom);
+
+    const candidates: Array<{
+      prop: PropertyMapItem;
+      edgeX: number;
+      edgeY: number;
+      angleDeg: number;
+      distKm: number;
+    }> = [];
+
+    for (const prop of mappableProperties) {
+      if (typeof prop.lat !== 'number' || typeof prop.lng !== 'number') continue;
+      const pos = getScreenPos(prop.lat, prop.lng);
+      const isVisible =
+        pos.x >= 20 &&
+        pos.x <= dimensions.width - 20 &&
+        pos.y >= 20 &&
+        pos.y <= dimensions.height - 20;
+      if (isVisible) continue;
+
+      const dx = pos.x - cx;
+      const dy = pos.y - cy;
+      if (dx === 0 && dy === 0) continue;
+
+      const tX = dx !== 0 ? halfW / Math.abs(dx) : Infinity;
+      const tY = dy < 0 ? halfHTop / Math.abs(dy) : dy > 0 ? halfHBottom / Math.abs(dy) : Infinity;
+      const t = Math.min(tX, tY);
+
+      candidates.push({
+        prop,
+        edgeX: cx + dx * t,
+        edgeY: cy + dy * t,
+        angleDeg: (Math.atan2(dy, dx) * 180) / Math.PI,
+        distKm: calculateDistanceKm(center.lat, center.lng, prop.lat, prop.lng),
+      });
+    }
+
+    candidates.sort((a, b) => a.distKm - b.distKm);
+
+    const accepted: typeof candidates = [];
+    for (const item of candidates) {
+      const overlaps = accepted.some(
+        (other) =>
+          Math.abs(other.edgeX - item.edgeX) < 92 &&
+          Math.abs(other.edgeY - item.edgeY) < 34
+      );
+      if (!overlaps) {
+        accepted.push(item);
+        if (accepted.length >= 6) break;
+      }
+    }
+    return accepted;
+  }, [mappableProperties, getScreenPos, dimensions, center.lat, center.lng]);
+
 
   // Nearest Noise Hotspot and Sound Shadow calculations for Selected Property
   // Cap waveguide ray distance to 600m so noise vectors only connect to genuinely local sources
@@ -2548,6 +2612,52 @@ export const PropertyMap: React.FC<PropertyMapProps> = ({
           </div>
         )
       )}
+
+      {/* Off-Screen Directional Edge Shortcut Pills */}
+      {offScreenShortcuts.map(({ prop, edgeX, edgeY, angleDeg, distKm }) => {
+        const priceLabel =
+          prop.price >= 1000
+            ? `R${(prop.price / 1000).toFixed(prop.price % 1000 === 0 ? 0 : 1)}k`
+            : `R${prop.price}`;
+        const distLabel = distKm < 1 ? `${Math.round(distKm * 1000)}m` : `${distKm.toFixed(1)}km`;
+        return (
+          <button
+            key={`edge-${prop.id}`}
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              setCenter({ lat: prop.lat, lng: prop.lng });
+              if (zoom < 14.2) smoothZoomTo(14.2);
+              onSelectProperty?.(prop);
+            }}
+            style={{
+              left: `${edgeX}px`,
+              top: `${edgeY}px`,
+              transform: 'translate(-50%, -50%)',
+            }}
+            className="absolute z-30 flex items-center gap-1 px-2 py-1 rounded-full bg-zinc-950/90 hover:bg-indigo-600 text-white border border-white/25 shadow-lg backdrop-blur-md text-[10.5px] font-extrabold transition-colors cursor-pointer whitespace-nowrap"
+            title={`Jump to ${prop.title} (${distLabel} away)`}
+          >
+            <svg
+              viewBox="0 0 16 16"
+              className="w-3 h-3 text-emerald-400 shrink-0"
+              style={{ transform: `rotate(${angleDeg}deg)` }}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M3 8h9" />
+              <path d="M8.5 4.5 12 8l-3.5 3.5" />
+            </svg>
+            <span>{priceLabel}</span>
+            <span className="text-zinc-300 font-semibold">· {distLabel}</span>
+          </button>
+        );
+      })}
 
       {/* Map Zoom & Action Controls (Bottom Right) */}
       <div className="absolute bottom-6 right-6 z-40 flex flex-col gap-2 pointer-events-auto items-end">

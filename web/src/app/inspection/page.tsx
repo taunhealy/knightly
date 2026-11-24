@@ -11,14 +11,14 @@ import {
   FloppyDisk,
   MagnifyingGlass,
   Plus,
-  Sparkle,
   Trash,
   WarningCircle,
+  X,
 } from '@phosphor-icons/react';
 import { Navbar } from '@/components/Navbar';
 import { useAuth } from '@/lib/auth-context';
 import { apiUrl } from '@/lib/apiClient';
-import { compressImageToDataUrl, consumeAuditCredit, getPlanSummary, type PlanSummary } from '@/lib/pro-plan';
+import { compressImageToDataUrl } from '@/lib/pro-plan';
 
 interface InspectionItem {
   id: string;
@@ -29,15 +29,54 @@ interface InspectionItem {
   photo_data: string;
 }
 
-const ROOM_PRESETS = [
-  'Kitchen',
-  'Living Area',
-  'Bedroom',
-  'Bathroom',
-  'Balcony / Exterior',
-  'Windows & Locks',
-  'Meters & Keys',
-];
+const DEFAULT_ROOM_TEMPLATES: Record<string, string[]> = {
+  Kitchen: [
+    'Stove / oven & hob burners',
+    'Extractor fan & light',
+    'Sink, taps & under-sink plumbing',
+    'Cupboard doors, hinges & drawers',
+    'Countertops & splashback tiles',
+  ],
+  'Living Area': [
+    'Walls, paint & skirting boards',
+    'Flooring / tiles / carpets',
+    'Windows, latches & blinds',
+    'Light fittings & plug sockets',
+    'Doors, handles & locks',
+  ],
+  Bedroom: [
+    'Built-in cupboards & sliding doors',
+    'Walls, ceiling & paintwork',
+    'Flooring / carpets',
+    'Windows, handles & curtain rails',
+    'Light switches & plug sockets',
+  ],
+  Bathroom: [
+    'Shower / bath seals & grout',
+    'Toilet flush & seat',
+    'Basin, taps & drain flow',
+    'Mirror / vanity cabinet',
+    'Extractor fan & damp / mould check',
+  ],
+  'Balcony / Exterior': [
+    'Tiles / paving & drainage',
+    'Balustrade / railing stability',
+    'Sliding door track & lock',
+    'Exterior lights & tap',
+  ],
+  'Windows & Locks': [
+    'Window latches & hinges',
+    'Burglar bars & security gates',
+    'Front door deadbolt & keys',
+  ],
+  'Meters & Keys': [
+    'Water meter reading & photo',
+    'Prepaid / electricity meter reading & photo',
+    'Front keys, remotes & access tags',
+  ],
+};
+
+const ROOM_PRESETS = Object.keys(DEFAULT_ROOM_TEMPLATES);
 
 export default function IngoingInspectionPage() {
   const { user, profile } = useAuth();
@@ -52,12 +91,10 @@ export default function IngoingInspectionPage() {
 
   const [selectedRoom, setSelectedRoom] = useState('Kitchen');
   const [customRoom, setCustomRoom] = useState('');
-  const [propertyInput, setPropertyInput] = useState('');
-  const [isGeneratingCriteria, setIsGeneratingCriteria] = useState(false);
-  const [tailoredCriteria, setTailoredCriteria] = useState<{
-    property_summary?: string;
-    rooms: Array<{ room: string; checks: string[] }>;
-  } | null>(null);
+  const [roomFields, setRoomFields] = useState<Record<string, string[]>>(() => ({
+    ...DEFAULT_ROOM_TEMPLATES,
+  }));
+  const [newFieldText, setNewFieldText] = useState('');
   const [newStatus, setNewStatus] = useState<'good' | 'minor_wear' | 'defect'>('defect');
   const [isSaving, setIsSaving] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -87,16 +124,7 @@ export default function IngoingInspectionPage() {
     };
   }, [propertyAddress]);
   const [isSendingEmail, setIsSendingEmail] = useState(false);
-  const [describingId, setDescribingId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const [plan, setPlan] = useState<PlanSummary | null>(null);
-
-  useEffect(() => {
-    setPlan(getPlanSummary());
-    const sync = () => setPlan(getPlanSummary());
-    window.addEventListener('homeseek-plan-updated', sync);
-    return () => window.removeEventListener('homeseek-plan-updated', sync);
-  }, []);
 
   useEffect(() => {
     const effectiveUid = user?.uid || 'guest_inspector';
@@ -295,71 +323,36 @@ export default function IngoingInspectionPage() {
     }
   };
 
-  const handleAiDescribe = async (item: InspectionItem) => {
-    if (!item.photo_data || describingId) return;
-    if ((plan?.remainingAudits ?? 0) <= 0) {
-      setStatusMsg({ type: 'err', text: 'No AI credits left for auto-describe. Enter notes manually or top up.' });
-      return;
-    }
-    setDescribingId(item.id);
-    setStatusMsg(null);
-    try {
-      const res = await fetch(apiUrl('/api/inspections/ai-describe'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ room: item.room, photo_data: item.photo_data, existing_notes: item.notes }),
-      });
-      const data = await res.json();
-      if (data?.description) {
-        setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, notes: data.description } : x)));
-      }
-      if (data?.status === 'success' && !data?.is_fallback) {
-        consumeAuditCredit();
-      }
-    } catch {
-      setStatusMsg({ type: 'err', text: 'AI description failed. No credit charged.' });
-    } finally {
-      setDescribingId(null);
-    }
+  const activeRoomChecks = roomFields[activeRoomName] ?? [
+    'Walls, ceiling & paintwork',
+    'Flooring / tiles / carpets',
+    'Windows, doors & locks',
+    'Lights & plug sockets',
+  ];
+
+  const handleUpdateRoomField = (index: number, nextValue: string) => {
+    setRoomFields((prev) => {
+      const current = [...(prev[activeRoomName] ?? activeRoomChecks)];
+      current[index] = nextValue;
+      return { ...prev, [activeRoomName]: current };
+    });
   };
 
-  const handleGenerateCriteria = async () => {
-    const q = propertyInput.trim() || propertyAddress.trim();
-    if (!q || isGeneratingCriteria) return;
-    if ((plan?.remainingAudits ?? 0) <= 0) {
-      setStatusMsg({ type: 'err', text: 'No AI credits left to analyze property criteria. Top up or add rooms manually.' });
-      return;
-    }
-    setIsGeneratingCriteria(true);
-    setStatusMsg(null);
-    try {
-      const res = await fetch(apiUrl('/api/inspections/generate-criteria'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ property_input: q, property_address: propertyAddress }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.detail || 'Could not generate criteria');
-      const crit = data?.criteria;
-      if (crit && Array.isArray(crit.rooms) && crit.rooms.length > 0) {
-        setTailoredCriteria(crit);
-        setSelectedRoom(crit.rooms[0].room);
-        setCustomRoom('');
-        if (!propertyAddress.trim() && crit.detected_address) {
-          setPropertyAddress(crit.detected_address);
-        }
-      }
-      if (data?.status === 'success' && !data?.is_fallback) {
-        consumeAuditCredit();
-        setStatusMsg({ type: 'ok', text: 'Generated tailored AI inspection criteria for this property (1 AI credit used).' });
-      } else {
-        setStatusMsg({ type: 'ok', text: 'Generated tailored inspection criteria (no credit charged).' });
-      }
-    } catch (err: any) {
-      setStatusMsg({ type: 'err', text: err?.message || 'Could not analyze property details.' });
-    } finally {
-      setIsGeneratingCriteria(false);
-    }
+  const handleRemoveRoomField = (index: number) => {
+    setRoomFields((prev) => {
+      const current = [...(prev[activeRoomName] ?? activeRoomChecks)];
+      return { ...prev, [activeRoomName]: current.filter((_, i) => i !== index) };
+    });
+  };
+
+  const handleAddRoomField = () => {
+    const clean = newFieldText.trim();
+    if (!clean) return;
+    setRoomFields((prev) => ({
+      ...prev,
+      [activeRoomName]: [...(prev[activeRoomName] ?? activeRoomChecks), clean],
+    }));
+    setNewFieldText('');
   };
 
   const handleLogCheckNote = (roomName: string, checkText: string) => {
@@ -548,52 +541,12 @@ export default function IngoingInspectionPage() {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <h2 className="text-sm font-extrabold">Add Room Photo &amp; Condition Note</h2>
           <span className="text-[11px] text-zinc-400">
-            {items.length} item(s) documented · AI Credits: <strong className="text-indigo-300">{plan?.remainingAudits ?? 0}</strong>
+            {items.length} item(s) documented
           </span>
         </div>
 
-        {/* AI Property-Tailored Inspection Criteria */}
-        <div className="p-3.5 rounded-2xl bg-indigo-950/35 border border-indigo-500/25 space-y-2.5">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <span className="text-[11px] font-extrabold text-indigo-200 flex items-center gap-1.5">
-              <Sparkle size={13} weight="fill" className="text-amber-300" />
-              <span>AI Property Criteria Generator</span>
-            </span>
-            <span className="text-[10px] text-zinc-400">
-              Paste a Property24 link, listing ID, or features to tailor rooms &amp; checks
-            </span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <input
-              type="text"
-              value={propertyInput}
-              onChange={(e) => setPropertyInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleGenerateCriteria();
-              }}
-              placeholder="Paste Property24 URL, ID, or details (e.g. gas hob, parquet floors, patio, pet-friendly)..."
-              className="flex-1 min-w-[220px] px-3 py-2 rounded-xl bg-black/50 border border-white/15 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-400"
-            />
-            <button
-              type="button"
-              disabled={isGeneratingCriteria || (!propertyInput.trim() && !propertyAddress.trim())}
-              onClick={handleGenerateCriteria}
-              className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shrink-0"
-            >
-              {isGeneratingCriteria ? <CircleNotch size={13} className="animate-spin" /> : <Sparkle size={13} weight="fill" className="text-amber-300" />}
-              <span>{isGeneratingCriteria ? 'Analyzing...' : 'Tailor Criteria (1 Credit)'}</span>
-            </button>
-          </div>
-          {tailoredCriteria?.property_summary && (
-            <p className="text-[11px] text-indigo-200/90 font-medium">{tailoredCriteria.property_summary}</p>
-          )}
-        </div>
-
         <div className="flex items-center flex-wrap gap-1.5">
-          {(tailoredCriteria?.rooms?.length
-            ? Array.from(new Set([...tailoredCriteria.rooms.map((r) => r.room), ...ROOM_PRESETS]))
-            : ROOM_PRESETS
-          ).map((room) => (
+          {ROOM_PRESETS.map((room) => (
             <button
               key={room}
               type="button"
@@ -618,31 +571,57 @@ export default function IngoingInspectionPage() {
           />
         </div>
 
-        {(() => {
-          const activeChecks = tailoredCriteria?.rooms?.find((r) => r.room === activeRoomName)?.checks;
-          if (!activeChecks || activeChecks.length === 0) return null;
-          return (
-            <div className="p-3 rounded-2xl bg-black/35 border border-white/10 space-y-1.5">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
-                What to check &amp; photograph in {activeRoomName}:
+        <div className="p-3 rounded-2xl bg-black/35 border border-white/10 space-y-2">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
+            Checklist fields for {activeRoomName} (edit, remove, or add fields):
+          </div>
+          <div className="space-y-1.5">
+            {activeRoomChecks.map((chk, idx) => (
+              <div key={idx} className="flex items-center gap-2 text-xs text-zinc-200">
+                <input
+                  type="text"
+                  value={chk}
+                  onChange={(e) => handleUpdateRoomField(idx, e.target.value)}
+                  className="flex-1 px-2.5 py-1 rounded-lg bg-black/50 border border-white/10 text-xs text-white focus:outline-none focus:border-indigo-400"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleLogCheckNote(activeRoomName, chk)}
+                  className="px-2 py-1 rounded-lg bg-white/10 hover:bg-indigo-600 text-[10px] font-bold shrink-0 cursor-pointer transition-colors"
+                >
+                  + Log Check
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveRoomField(idx)}
+                  className="p-1 text-zinc-500 hover:text-rose-400 cursor-pointer"
+                  title="Remove field"
+                >
+                  <X size={13} weight="bold" />
+                </button>
               </div>
-              <div className="space-y-1">
-                {activeChecks.map((chk, idx) => (
-                  <div key={idx} className="flex items-center justify-between gap-2 text-xs text-zinc-200">
-                    <span>• {chk}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleLogCheckNote(activeRoomName, chk)}
-                      className="px-2 py-0.5 rounded-lg bg-white/10 hover:bg-indigo-600 text-[10px] font-bold shrink-0 cursor-pointer transition-colors"
-                    >
-                      + Log Check
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })()}
+            ))}
+          </div>
+          <div className="flex items-center gap-2 pt-1">
+            <input
+              type="text"
+              value={newFieldText}
+              onChange={(e) => setNewFieldText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleAddRoomField();
+              }}
+              placeholder={`+ Add custom field for ${activeRoomName}...`}
+              className="flex-1 px-2.5 py-1 rounded-lg bg-black/50 border border-white/10 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-400"
+            />
+            <button
+              type="button"
+              onClick={handleAddRoomField}
+              className="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-400/30 text-[11px] font-bold text-indigo-200 cursor-pointer"
+            >
+              + Add Field
+            </button>
+          </div>
+        </div>
 
         <div className="flex items-center flex-wrap gap-3">
           <div className="flex items-center gap-1.5 bg-black/40 p-1 rounded-xl border border-white/10">
@@ -742,24 +721,6 @@ export default function IngoingInspectionPage() {
               placeholder="Describe exact condition or pre-existing defect..."
               className="w-full p-2.5 rounded-xl bg-black/50 border border-white/15 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-400 resize-none"
             />
-
-            {item.photo_data && (
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  disabled={describingId === item.id}
-                  onClick={() => handleAiDescribe(item)}
-                  className="px-2.5 py-1 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-400/30 text-[11px] font-bold text-purple-200 flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                >
-                  {describingId === item.id ? (
-                    <CircleNotch size={12} className="animate-spin" />
-                  ) : (
-                    <Sparkle size={12} weight="fill" className="text-amber-300" />
-                  )}
-                  <span>{describingId === item.id ? 'Describing...' : 'Auto-Describe with AI (1 Credit)'}</span>
-                </button>
-              </div>
-            )}
           </div>
         ))}
       </div>

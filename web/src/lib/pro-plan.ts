@@ -25,14 +25,14 @@ export const PLAN_CATALOG = {
     tier: 'free' as ProPlanTier,
     label: 'Free Scout',
     priceLabel: 'R0',
-    baseQuota: 2,
+    baseQuota: 0,
     canUploadPhotos: false,
     canExportSnagReport: false,
     canUseAiCompare: false,
   },
   hunter_pass: {
     tier: 'hunter_pass' as ProPlanTier,
-    label: '30-Day Hunter Pass',
+    label: 'Hunter Pass',
     priceLabel: 'R149 once-off',
     baseQuota: 40,
     canUploadPhotos: true,
@@ -52,7 +52,7 @@ export const PLAN_CATALOG = {
 
 export function getPlanSummary(): PlanSummary {
   if (typeof window === 'undefined') {
-    return { ...PLAN_CATALOG.free, topupCredits: 0, auditsUsed: 0, remainingAudits: 2 };
+    return { ...PLAN_CATALOG.free, topupCredits: 0, auditsUsed: 0, remainingAudits: 0 };
   }
   const rawTier = (localStorage.getItem(PLAN_TIER_KEY) as ProPlanTier) || 'free';
   const cfg = PLAN_CATALOG[rawTier] || PLAN_CATALOG.free;

@@ -55,7 +55,7 @@ export default function TabLayout() {
         name="index"
         options={{
           title: 'Search',
-          headerTitle: 'Knightly · Search Radar',
+          headerTitle: 'Knightly · Search',
           tabBarIcon: ({ color, size }) => <Ionicons name="search" size={size - 2} color={color as string} />,
         }}
       />
@@ -79,9 +79,9 @@ export default function TabLayout() {
       <Tabs.Screen
         name="alerts"
         options={{
+          href: null,
           title: 'Alerts',
           headerTitle: 'AI Radar Alerts',
-          tabBarIcon: ({ color, size }) => <Ionicons name="notifications-outline" size={size - 2} color={color as string} />,
         }}
       />
       <Tabs.Screen

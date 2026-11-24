@@ -26,7 +26,7 @@ def _ensure_profile(db, user_id: str) -> UserProfileModel:
         row = UserProfileModel(
             user_id=uid,
             tier="free",
-            ai_credits=50,
+            ai_credits=0,
             auth_provider="google",
             profile_json={},
             created_at=now,
@@ -52,7 +52,7 @@ def get_credit_balance(user_id: str) -> Dict[str, Any]:
         )
         return {
             "user_id": uid,
-            "ai_credits": int(prof.ai_credits if prof.ai_credits is not None else 50),
+            "ai_credits": int(prof.ai_credits if prof.ai_credits is not None else 0),
             "tier": prof.tier or "free",
             "pricing": CREDIT_COSTS,
             "transactions": [
@@ -77,7 +77,7 @@ def require_credits(user_id: str, action: str, override_cost: Optional[int] = No
     uid = (user_id or "").strip() or "local-dev-user"
     with SessionLocal() as db:
         prof = _ensure_profile(db, uid)
-        bal = int(prof.ai_credits if prof.ai_credits is not None else 50)
+        bal = int(prof.ai_credits if prof.ai_credits is not None else 0)
         if bal < cost:
             raise HTTPException(
                 status_code=402,
@@ -133,7 +133,7 @@ def add_credits(user_id: str, amount: int, reason: str = "topup") -> int:
     now = time.time()
     with SessionLocal() as db:
         prof = _ensure_profile(db, uid)
-        bal = int(prof.ai_credits if prof.ai_credits is not None else 50)
+        bal = int(prof.ai_credits if prof.ai_credits is not None else 0)
         new_bal = bal + max(0, int(amount))
         prof.ai_credits = new_bal
         prof.last_active = now

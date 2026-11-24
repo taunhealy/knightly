@@ -34,14 +34,27 @@ def init_community_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_nicknames (
                 user_id TEXT PRIMARY KEY,
+                email TEXT DEFAULT '',
                 nickname TEXT UNIQUE NOT NULL,
                 avatar_url TEXT,
                 created_at REAL NOT NULL
             )
         """)
         conn.commit()
+        for col_sql in (
+            "ALTER TABLE user_nicknames ADD COLUMN avatar_url TEXT",
+            "ALTER TABLE user_nicknames ADD COLUMN email TEXT DEFAULT ''",
+        ):
+            try:
+                conn.execute(col_sql)
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
         try:
-            conn.execute("ALTER TABLE user_nicknames ADD COLUMN avatar_url TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_user_nicknames_email ON user_nicknames(email)")
             conn.commit()
         except Exception:
             try:
@@ -108,23 +121,49 @@ def _generate_reddit_nickname() -> str:
     return f"{adj}{noun}{num}"
 
 
-def get_or_create_nickname(user_id: str) -> str:
+def get_or_create_nickname(user_id: str, email: Optional[str] = None) -> str:
     uid = str(user_id or "").strip()
-    if not uid:
+    clean_email = str(email or "").strip().lower()
+    if not uid and not clean_email:
         return _generate_reddit_nickname()
 
     with _get_connection() as conn:
-        row = conn.execute("SELECT nickname FROM user_nicknames WHERE user_id = ?", (uid,)).fetchone()
-        if row:
-            return row["nickname"]
+        if uid:
+            row = conn.execute(
+                "SELECT nickname, email FROM user_nicknames WHERE user_id = ?",
+                (uid,),
+            ).fetchone()
+            if row:
+                if clean_email and not (row["email"] or "").strip():
+                    try:
+                        conn.execute(
+                            "UPDATE user_nicknames SET email = ? WHERE user_id = ?",
+                            (clean_email, uid),
+                        )
+                        conn.commit()
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                return row["nickname"]
+
+        if clean_email:
+            email_row = conn.execute(
+                "SELECT nickname FROM user_nicknames WHERE lower(email) = lower(?) LIMIT 1",
+                (clean_email,),
+            ).fetchone()
+            if email_row:
+                return email_row["nickname"]
 
         now = time.time()
+        insert_uid = uid or f"email-{hashlib.sha256(clean_email.encode('utf-8')).hexdigest()[:16]}"
         for _ in range(25):
             candidate = _generate_reddit_nickname()
             try:
                 conn.execute(
-                    "INSERT INTO user_nicknames (user_id, nickname, created_at) VALUES (?, ?, ?)",
-                    (uid, candidate, now),
+                    "INSERT INTO user_nicknames (user_id, email, nickname, created_at) VALUES (?, ?, ?, ?)",
+                    (insert_uid, clean_email, candidate, now),
                 )
                 conn.commit()
                 return candidate
@@ -137,8 +176,8 @@ def get_or_create_nickname(user_id: str) -> str:
 
         fallback = f"Seeker{uuid.uuid4().hex[:6].upper()}"
         conn.execute(
-            "INSERT OR IGNORE INTO user_nicknames (user_id, nickname, created_at) VALUES (?, ?, ?)",
-            (uid, fallback, now),
+            "INSERT OR IGNORE INTO user_nicknames (user_id, email, nickname, created_at) VALUES (?, ?, ?, ?)",
+            (insert_uid, clean_email, fallback, now),
         )
         conn.commit()
         return fallback
@@ -203,7 +242,7 @@ def login_email_user(email: str, password: str) -> Dict[str, Any]:
         if not row or not _verify_password(password, row["password_hash"]):
             return {"status": "unauthorized", "detail": "Invalid email or password."}
 
-    cprof = get_user_community_profile(row["user_id"])
+    cprof = get_user_community_profile(row["user_id"], email=clean_email)
     return {
         "status": "success",
         "user": {
@@ -216,16 +255,24 @@ def login_email_user(email: str, password: str) -> Dict[str, Any]:
     }
 
 
-def get_user_community_profile(user_id: str) -> Dict[str, Optional[str]]:
+def get_user_community_profile(user_id: str, email: Optional[str] = None) -> Dict[str, Optional[str]]:
     uid = str(user_id or "").strip()
-    nickname = get_or_create_nickname(uid)
-    if not uid:
+    clean_email = str(email or "").strip().lower()
+    nickname = get_or_create_nickname(uid, email=clean_email)
+    if not uid and not clean_email:
         return {"nickname": nickname, "avatar_url": None}
     with _get_connection() as conn:
-        row = conn.execute(
-            "SELECT nickname, avatar_url FROM user_nicknames WHERE user_id = ?",
-            (uid,),
-        ).fetchone()
+        row = None
+        if uid:
+            row = conn.execute(
+                "SELECT nickname, avatar_url FROM user_nicknames WHERE user_id = ?",
+                (uid,),
+            ).fetchone()
+        if not row and clean_email:
+            row = conn.execute(
+                "SELECT nickname, avatar_url FROM user_nicknames WHERE lower(email) = lower(?) LIMIT 1",
+                (clean_email,),
+            ).fetchone()
         if row:
             return {"nickname": row["nickname"], "avatar_url": row["avatar_url"]}
         return {"nickname": nickname, "avatar_url": None}

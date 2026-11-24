@@ -18,7 +18,6 @@ import {
   askListingChat,
   fetchLiveListings,
   runForensicVision,
-  saveUserAlert,
   type MobileProperty,
 } from '@/lib/api';
 import { useHomeSeek } from '@/lib/store';
@@ -204,6 +203,7 @@ export default function SearchScreen() {
   const [parkingFilter, setParkingFilter] = useState(false);
   const [petFilter, setPetFilter] = useState(false);
   const [privateFilter, setPrivateFilter] = useState(false);
+  const [belowMarketFilter, setBelowMarketFilter] = useState(false);
   const [furnishedFilter, setFurnishedFilter] = useState<'all' | 'furnished' | 'unfurnished'>('all');
   const [showHidden, setShowHidden] = useState(false);
 
@@ -284,6 +284,7 @@ export default function SearchScreen() {
       if (parkingFilter && !p.has_garage && !p.has_secure_bay) return false;
       if (petFilter && !p.pet_friendly) return false;
       if (privateFilter && p.is_landlord_on_site) return false;
+      if (belowMarketFilter && (typeof p.price_value_pct !== 'number' || p.price_value_pct >= 0)) return false;
       if (furnishedFilter !== 'all') {
         const txt = `${p.title || ''} ${p.description || ''} ${(p as any).furnished || ''}`.toLowerCase();
         const isUnfurnished = txt.includes('unfurnished');
@@ -312,32 +313,7 @@ export default function SearchScreen() {
       (p, idx) => ({ ...p, rank: idx + 1 })
     );
     return { visibleListings: visible, hiddenCount: hidden.length };
-  }, [listings, hiddenIds, showHidden, maxPrice, safeishFilter, offMainRoadFilter, fibreFilter, parkingFilter, petFilter, privateFilter, furnishedFilter, inRadiusFilter, proximityAnchor, proximityRadiusKm]);
-
-  const handleSaveAsAlert = async () => {
-    try {
-      await saveUserAlert(apiBaseUrl, {
-        user_id: 'taun_test_user',
-        target_area: selectedSuburbs.join(', '),
-        search_query: `AI Radar: ${selectedSuburbs.join(', ')} (${bedrooms}, R${minPrice}–R${maxPrice})`,
-        min_price: parseInt(minPrice, 10) || 0,
-        max_price: parseInt(maxPrice, 10) || 22000,
-        min_bedrooms: bedrooms === 'any' ? [] : [parseFloat(bedrooms) || 1],
-        safeish: safeishFilter,
-        off_main_road: offMainRoadFilter,
-        fibre_ready: fibreFilter,
-        off_street_parking: parkingFilter,
-        pet_friendly: petFilter,
-        private_only: privateFilter,
-        min_fit_score: 80,
-        trigger_initial_scan: false,
-      });
-      setStatusBanner('Saved personal AI Alert! Check the Alerts tab.');
-      setTimeout(() => setStatusBanner(null), 4000);
-    } catch {
-      setStatusBanner('Could not save alert — check backend connection.');
-    }
-  };
+  }, [listings, hiddenIds, showHidden, maxPrice, safeishFilter, offMainRoadFilter, fibreFilter, parkingFilter, petFilter, privateFilter, belowMarketFilter, furnishedFilter, inRadiusFilter, proximityAnchor, proximityRadiusKm]);
 
   const openAiModal = async (prop: MobileProperty) => {
     setAiProp(prop);
@@ -385,10 +361,6 @@ export default function SearchScreen() {
           </Pressable>
 
           <View style={styles.actionRow}>
-            <Pressable style={styles.saveAlertBtn} onPress={handleSaveAsAlert}>
-              <Ionicons name="notifications" size={13} color="#4f46e5" />
-              <Text style={styles.saveAlertText}>Save Alert</Text>
-            </Pressable>
             <Pressable
               style={[styles.scrapeBtn, isScraping && { opacity: 0.6 }]}
               onPress={() => loadCached(true)}
@@ -445,6 +417,7 @@ export default function SearchScreen() {
             { label: 'Parking', active: parkingFilter, toggle: () => setParkingFilter(!parkingFilter) },
             { label: 'Pet-friendly', active: petFilter, toggle: () => setPetFilter(!petFilter) },
             { label: 'Private', active: privateFilter, toggle: () => setPrivateFilter(!privateFilter) },
+            { label: 'Below market value', active: belowMarketFilter, toggle: () => setBelowMarketFilter((v) => !v) },
             {
               label:
                 furnishedFilter === 'all'

@@ -1164,48 +1164,44 @@ def scrape_p24_live(
             ):
                 is_address_withheld = False
 
+            from services.listing_classifier import classify_listing_features, classify_privacy
+
             comb_text = f"{title_str} {item_text} {detail_text}".lower()
-            stove_type = "gas" if any(k in comb_text for k in ["gas hob", "gas stove", "gas cooker", "gas burner"]) else (
-                "induction" if any(k in comb_text for k in ["induction hob", "induction stove"]) else (
-                    "electric" if any(k in comb_text for k in ["electric stove", "electric hob", "solid plate"]) else (
-                        "gas" if "gas" in comb_text and ("hob" in comb_text or "stove" in comb_text or "cooker" in comb_text) else "electric"
-                    )
-                )
+            feats = classify_listing_features(
+                text=f"{item_text} {detail_text}",
+                title=title_str,
+                address=final_address,
+                pkg_cnt=pkg_cnt,
             )
-            has_garage = bool(re.search(
-                r'\b(?:garage|garages|lock-up|lock\s+up\s+garage|automated\s+garage|single\s+garage|double\s+garage)\b',
-                comb_text
-            )) or pkg_cnt >= 2
-            has_secure_bay = bool(re.search(
-                r'\b(?:secure\s+parking(?:\s+bay)?|parking\s+bay|off-street\s+parking|off\s+street\s+parking|undercover\s+parking|basement\s+parking|allocated\s+(?:parking|bay)|shaded\s+parking|carport|vehicular\s+access(?:\s+driveway)?|sliding\s+gate\s+vehicular\s+access|remote\s+controlled\s+(?:sliding\s+)?gate\s+(?:vehicular\s+)?access|parking\s+behind\s+gate|secure\s+off-street)\b',
-                comb_text
-            )) or pkg_cnt > 0
+            stove_type = feats["stove_type"]
+            has_garage = bool(feats["has_garage"] or pkg_cnt >= 2)
+            has_secure_bay = bool(feats["has_secure_bay"] or has_garage)
             parking_type = "garage" if has_garage else ("secure_bay" if has_secure_bay else "none")
-            pet_friendly = True if re.search(r'\b(?:pet friendly|pets allowed|pets welcome|dogs allowed|cats allowed)\b', comb_text) else (
-                False if re.search(r'\b(?:no pets|pets not allowed|no dogs|no cats)\b', comb_text) else False
-            )
-            fibre_ready = bool(re.search(r'\b(?:fibre|fiber|wifi|internet)\b', comb_text)) and not bool(re.search(r'\b(?:no\s+fibre|not\s+fibre\s+ready)\b', comb_text))
-            has_inverter = bool(re.search(r'\b(?:inverter|solar|backup|ups|load shedding)\b', comb_text))
+            pet_friendly = bool(feats["pet_friendly"])
+            fibre_ready = bool(feats["fibre_ready"])
+            has_inverter = bool(feats["has_inverter"])
+            is_main_road = bool(feats["is_main_road"])
 
-            # Privacy & Landlord On-Site Detection
-            is_cottage_or_flatlet = bool(re.search(
-                r'\b(?:cottage|garden cottage|nutec cottage|granny flat|flatlet|separate entrance|attached flatlet|wing of the house|shared property|behind the main house|behind main house|attached to main house|landlord lives|owner lives|landlord on site|landlord on-site|owner on site|owner on-site|on owners? property|on landlords? property|main house|suit single|dual living|shared yard|shared garden|shared gate|shared driveway)\b',
-                comb_text
-            ))
-            dwelling_privacy = "garden_cottage" if re.search(r'\b(?:cottage|garden cottage|nutec cottage|granny flat)\b', comb_text) else (
-                "attached_flatlet" if re.search(r'\b(?:flatlet|separate entrance|wing of the house)\b', comb_text) else (
-                    "room_shared" if re.search(r'\b(?:room to let|flatshare|digs|shared house)\b', comb_text) else (
-                        "landlord_on_site" if is_cottage_or_flatlet else "independent"
-                    )
-                )
-            )
-            is_landlord_on_site = is_cottage_or_flatlet or dwelling_privacy in ["garden_cottage", "attached_flatlet", "room_shared", "landlord_on_site"]
+            try:
+                from services.address_normalizer import detect_security_estate as _detect_est
+                _est = _detect_est(lat, lng, f"{title_str} {final_address} {desc_str if 'desc_str' in locals() else ''}")
+            except Exception:
+                _est = {"is_security_estate": False, "estate_name": None}
 
-            # Arterial Road & Noise Risk Detection
-            is_main_road = bool(re.search(
-                r'\b(main\s+r(oa)?d|victoria\s+r(oa)?d|somerset\s+r(oa)?d|regent\s+r(oa)?d|kloof\s+st(reet)?|kloof\s+nek|buitengracht|new\s+church(\s+st(reet)?)?|orange\s+st(reet)?|roeland\s+st(reet)?|buitenkant(\s+st(reet)?)?|strand\s+st(reet)?|helen\s+suzman|mill\s+st(reet)?|voortrekker\s+r(oa)?d|ou\s+kaapse\s+weg|kommetjie\s+r(oa)?d|baden\s+powell|highway|freeway|motorway|m3|m4|m5|m6|m62)\b',
-                f"{final_address} {title_str}".lower()
-            ))
+            est_flag = bool(_est.get("is_security_estate") or (geo_hit.get("is_security_estate") if isinstance(geo_hit, dict) else False))
+            est_name = _est.get("estate_name") or (geo_hit.get("estate_name") if isinstance(geo_hit, dict) else None)
+
+            priv = classify_privacy(
+                title=title_str,
+                address=final_address,
+                description=f"{item_text} {detail_text}",
+                estate_name=est_name or "",
+                bedrooms=beds_cnt,
+                is_security_estate=est_flag,
+            )
+            dwelling_privacy = priv["dwelling_privacy"]
+            is_landlord_on_site = priv["is_landlord_on_site"]
+
             noise_risk = 'high' if is_main_road else ('sanctuary' if any(k in loc_str.lower() for k in ['forest', 'heatherlands', 'camphersdrift', 'mountain']) else 'low')
             base_fit = random.randint(70, 80) if is_main_road else random.randint(86, 98)
 
@@ -1252,18 +1248,12 @@ def scrape_p24_live(
                         prev_first_seen = _prev.get("first_seen_at")
                         break
 
-            try:
-                from services.address_normalizer import detect_security_estate as _detect_est
-                _est = _detect_est(lat, lng, f"{title_str} {final_address} {desc_str if 'desc_str' in locals() else ''}")
-            except Exception:
-                _est = {"is_security_estate": False, "estate_name": None}
-
             item_obj = {
                 'id': f"p24-{lid}",
                 'first_seen_at': prev_first_seen or int(time.time()),
                 'available_from': avail_from,
-                'is_security_estate': bool(_est.get("is_security_estate") or (geo_hit.get("is_security_estate") if isinstance(geo_hit, dict) else False)),
-                'estate_name': _est.get("estate_name") or (geo_hit.get("estate_name") if isinstance(geo_hit, dict) else None),
+                'is_security_estate': est_flag,
+                'estate_name': est_name,
                 'p24_id': lid,
                 'title': title_str,
                 'address': final_address,

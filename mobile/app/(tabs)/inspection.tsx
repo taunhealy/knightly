@@ -17,11 +17,9 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import {
-  analyzeInspectionPhoto,
   fetchInspections,
   fetchLiveListings,
   fetchPublicSnags,
-  generateInspectionCriteria,
   MobileProperty,
   saveInspection,
 } from '@/lib/api';
@@ -39,6 +37,67 @@ interface InspectionEntry {
 }
 
 type PropertySourceTab = 'select' | 'address' | 'p24';
+
+const ROOM_TEMPLATES: { label: string; checks: string[] }[] = [
+  {
+    label: 'Bedroom',
+    checks: [
+      'Built-in cupboards & sliding doors',
+      'Walls, ceiling & paintwork',
+      'Flooring / carpets',
+      'Windows, handles & curtain rails',
+      'Light switches & plug sockets',
+    ],
+  },
+  {
+    label: 'Lounge / Living',
+    checks: [
+      'Walls, paint & skirting boards',
+      'Flooring / tiles / carpets',
+      'Windows, latches & blinds',
+      'Light fittings & plug sockets',
+      'Doors, handles & locks',
+    ],
+  },
+  {
+    label: 'Kitchen',
+    checks: [
+      'Stove / oven & hob burners',
+      'Extractor fan & light',
+      'Sink, taps & under-sink plumbing',
+      'Cupboard doors, hinges & drawers',
+      'Countertops & splashback tiles',
+      'Walls, ceiling & floor tiles',
+    ],
+  },
+  {
+    label: 'Bathroom',
+    checks: [
+      'Shower / bath seals & grout',
+      'Toilet flush & seat',
+      'Basin, taps & drain flow',
+      'Mirror / vanity cabinet',
+      'Extractor fan & damp / mould check',
+    ],
+  },
+  {
+    label: 'Balcony / Exterior',
+    checks: [
+      'Tiles / paving & drainage',
+      'Balustrade / railing stability',
+      'Sliding door track & lock',
+      'Exterior lights & tap',
+    ],
+  },
+  {
+    label: 'Entrance & Hallway',
+    checks: [
+      'Front door, security gate & locks',
+      'Intercom / doorbell',
+      'Flooring, walls & light fittings',
+    ],
+  },
+];
 
 export default function InspectionScreen() {
   const { apiBaseUrl, authUser, compareList, favourites } = useHomeSeek();
@@ -62,15 +121,12 @@ export default function InspectionScreen() {
   const [publicSnags, setPublicSnags] = useState<any[]>([]);
   const [isSaving, setIsSaving] = useState(false);
 
-  const [roomName, setRoomName] = useState('Lounge / Living Room');
+  const [roomName, setRoomName] = useState('');
   const [note, setNote] = useState('');
   const [photoUri, setPhotoUri] = useState<string | undefined>(undefined);
   const [photoBase64, setPhotoBase64] = useState<string | undefined>(undefined);
   const [entries, setEntries] = useState<InspectionEntry[]>([]);
-  const [criteriaRooms, setCriteriaRooms] = useState<{ room: string; checks: string[] }[]>([]);
-  const [isGeneratingCriteria, setIsGeneratingCriteria] = useState(false);
-  const [isAnalyzingPhoto, setIsAnalyzingPhoto] = useState(false);
-  const [analyzingEntryId, setAnalyzingEntryId] = useState<string | null>(null);
+  const [newFieldByEntry, setNewFieldByEntry] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let active = true;
@@ -169,37 +225,57 @@ export default function InspectionScreen() {
     setPropertyInput(prop.url || prop.title);
   };
 
-  const handleGenerateCriteria = async () => {
-    if (!propertyInput.trim() && !propertyAddress.trim()) {
-      Alert.alert('Enter Property Details', 'Paste a Property24 link, address, or unit description first.');
-      return;
-    }
-    setIsGeneratingCriteria(true);
-    try {
-      const res = await generateInspectionCriteria(apiBaseUrl, propertyInput, propertyAddress);
-      const rooms: { room: string; checks: string[] }[] = res?.criteria?.rooms || [];
-      setCriteriaRooms(rooms);
-      if (rooms.length > 0) {
-        setEntries((prev) => {
-          const existingRooms = new Set(prev.map((e) => e.room.toLowerCase()));
-          const stamp = new Date().toLocaleString();
-          const generated: InspectionEntry[] = rooms
-            .filter((r) => !existingRooms.has(r.room.toLowerCase()))
-            .map((r, idx) => ({
-              id: `insp-${Date.now()}-${idx}`,
-              room: r.room,
-              checks: r.checks || [],
-              note: (r.checks || []).join(' • '),
-              timestamp: stamp,
-            }));
-          return [...prev, ...generated];
-        });
-      }
-    } catch {
-      Alert.alert('Error', 'Could not reach backend inspection AI.');
-    } finally {
-      setIsGeneratingCriteria(false);
-    }
+  const addRoomFromTemplate = (roomLabel: string, presetChecks?: string[]) => {
+    const cleanLabel = roomLabel.trim();
+    if (!cleanLabel) return;
+    const defaultChecks = presetChecks ?? [
+      'Walls, ceiling & paintwork',
+      'Flooring / tiles / carpets',
+      'Windows, doors & locks',
+      'Lights & plug sockets',
+    ];
+    const newEntry: InspectionEntry = {
+      id: `insp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      room: cleanLabel,
+      checks: [...defaultChecks],
+      note: '',
+      timestamp: new Date().toLocaleString(),
+    };
+    setEntries((prev) => [newEntry, ...prev]);
+    if (!presetChecks) setRoomName('');
+  };
+
+  const updateEntryCheck = (entryId: string, checkIdx: number, value: string) => {
+    setEntries((prev) =>
+      prev.map((e) => {
+        if (e.id !== entryId) return e;
+        const nextChecks = [...(e.checks || [])];
+        nextChecks[checkIdx] = value;
+        return { ...e, checks: nextChecks };
+      })
+    );
+  };
+
+  const removeEntryCheck = (entryId: string, checkIdx: number) => {
+    setEntries((prev) =>
+      prev.map((e) => {
+        if (e.id !== entryId) return e;
+        return { ...e, checks: (e.checks || []).filter((_, i) => i !== checkIdx) };
+      })
+    );
+  };
+
+  const addEntryCheck = (entryId: string) => {
+    const label = (newFieldByEntry[entryId] || '').trim();
+    if (!label) return;
+    setEntries((prev) =>
+      prev.map((e) => (e.id === entryId ? { ...e, checks: [...(e.checks || []), label] } : e))
+    );
+    setNewFieldByEntry((prev) => ({ ...prev, [entryId]: '' }));
+  };
+
+  const removeEntry = (entryId: string) => {
+    setEntries((prev) => prev.filter((e) => e.id !== entryId));
   };
 
   const attachPhotoToEntry = async (entryId: string, fromCamera: boolean) => {
@@ -216,23 +292,7 @@ export default function InspectionScreen() {
 
     if (result.canceled || !result.assets[0]) return;
     const asset = result.assets[0];
-    const target = entries.find((e) => e.id === entryId);
     const dataUrl = asset.base64 ? `data:image/jpeg;base64,${asset.base64}` : '';
-
-    let nextNote = target?.note || '';
-    if (dataUrl) {
-      setAnalyzingEntryId(entryId);
-      try {
-        const aiRes = await analyzeInspectionPhoto(apiBaseUrl, target?.room || 'General', dataUrl, nextNote);
-        if (aiRes?.description) {
-          nextNote = aiRes.description;
-        }
-      } catch {
-        // Keep existing note if AI fails
-      } finally {
-        setAnalyzingEntryId(null);
-      }
-    }
 
     const updated = entries.map((e) =>
       e.id === entryId
@@ -240,7 +300,6 @@ export default function InspectionScreen() {
             ...e,
             photoUri: asset.uri,
             photoData: dataUrl || e.photoData || '',
-            note: nextNote,
             timestamp: new Date().toLocaleString(),
           }
         : e
@@ -272,19 +331,7 @@ export default function InspectionScreen() {
       const asset = result.assets[0];
       setPhotoUri(asset.uri);
       if (asset.base64) {
-        const dataUrl = `data:image/jpeg;base64,${asset.base64}`;
-        setPhotoBase64(dataUrl);
-        setIsAnalyzingPhoto(true);
-        try {
-          const aiRes = await analyzeInspectionPhoto(apiBaseUrl, roomName, dataUrl, note);
-          if (aiRes?.description) {
-            setNote(aiRes.description);
-          }
-        } catch {
-          // Allow manual note entry
-        } finally {
-          setIsAnalyzingPhoto(false);
-        }
+        setPhotoBase64(`data:image/jpeg;base64,${asset.base64}`);
       }
     }
   };
@@ -395,9 +442,9 @@ export default function InspectionScreen() {
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      {/* Property Details & AI Criteria Generator */}
+      {/* Property Details */}
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>1. Property Details & AI Checklist</Text>
+        <Text style={styles.sectionTitle}>1. Property Details</Text>
 
         {/* Source Tabs: Select / Address / P24 Link */}
         <View style={styles.tabRow}>
@@ -544,44 +591,39 @@ export default function InspectionScreen() {
             />
           </View>
         )}
-        <Pressable
-          style={[
-            styles.primaryBtn,
-            sourceTab === 'select' && !selectedProperty && { opacity: 0.45 },
-          ]}
-          onPress={handleGenerateCriteria}
-          disabled={isGeneratingCriteria || (sourceTab === 'select' && !selectedProperty)}
-        >
-          {isGeneratingCriteria ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Ionicons name="sparkles" size={14} color="#fde047" />
-          )}
-          <Text style={styles.primaryBtnText}>
-            {isGeneratingCriteria
-              ? 'Generating Checklist...'
-              : sourceTab === 'select' && !selectedProperty
-              ? 'Select a Property Above First'
-              : 'Generate Tailored AI Room Criteria'}
-          </Text>
-        </Pressable>
-
-        {criteriaRooms.length > 0 && (
-          <Text style={styles.aiStatus}>
-            Generated {criteriaRooms.length} room cards below — just snap photos and AI will write the report!
-          </Text>
-        )}
       </View>
 
-      {/* Add Timestamped Photo & Note */}
+      {/* Select Room Type & Add Checklist */}
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>2. Add Room Photo & Condition Note</Text>
-        <TextInput
-          value={roomName}
-          onChangeText={setRoomName}
-          placeholder="Room (e.g. Kitchen, Main Bedroom)"
-          style={styles.input}
-        />
+        <Text style={styles.sectionTitle}>2. Add Room Checklist or Photo Entry</Text>
+        <Text style={styles.emptySub}>
+          Tap a room type to add a standard checklist (you can edit, add, or remove any field below):
+        </Text>
+        <View style={styles.chipWrap}>
+          {ROOM_TEMPLATES.map((tpl) => (
+            <Pressable
+              key={tpl.label}
+              style={styles.areaChip}
+              onPress={() => addRoomFromTemplate(tpl.label, tpl.checks)}
+            >
+              <Text style={styles.areaChipText}>+ {tpl.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.searchRow}>
+          <TextInput
+            value={roomName}
+            onChangeText={setRoomName}
+            placeholder="Custom room name (e.g. Study, Garage, Laundry)..."
+            style={[styles.input, { flex: 1 }]}
+          />
+          <Pressable
+            style={[styles.selectPill, { paddingVertical: 10 }]}
+            onPress={() => addRoomFromTemplate(roomName || 'Custom Room')}
+          >
+            <Text style={styles.selectPillText}>+ Add Room</Text>
+          </Pressable>
+        </View>
         <View style={styles.rowBtns}>
           <Pressable style={styles.secondaryBtn} onPress={() => pickImage(true)}>
             <Ionicons name="camera" size={15} color="#4f46e5" />
@@ -593,18 +635,15 @@ export default function InspectionScreen() {
           </Pressable>
         </View>
         {photoUri && <Image source={{ uri: photoUri }} style={styles.previewImg} />}
-        {isAnalyzingPhoto && (
-          <Text style={styles.aiStatus}>AI inspecting photo for scuffs, damp & defects...</Text>
-        )}
         <TextInput
           value={note}
           onChangeText={setNote}
           multiline
-          placeholder="Condition note (auto-filled by AI when you attach a photo, or type manually)..."
-          style={[styles.input, { minHeight: 68 }]}
+          placeholder="Condition note (type your observations manually)..."
+          style={[styles.input, { minHeight: 64 }]}
         />
         <Pressable style={styles.saveBtn} onPress={addEntry}>
-          <Text style={styles.primaryBtnText}>+ Save Timestamped Entry</Text>
+          <Text style={styles.primaryBtnText}>+ Save Custom Photo / Note Entry</Text>
         </Pressable>
       </View>
 
@@ -682,33 +721,60 @@ export default function InspectionScreen() {
         </View>
         {entries.length === 0 ? (
           <Text style={styles.emptySub}>
-            Tap &quot;Generate Tailored AI Room Criteria&quot; above to auto-populate room cards, or add a custom room below.
+            Tap a room type above (Bedroom, Lounge, Kitchen, etc.) to add a checklist, or save a custom photo/note entry.
           </Text>
         ) : (
           entries.map((item) => (
             <View key={item.id} style={styles.roomEntryCard}>
               <View style={styles.rowBetween}>
                 <Text style={styles.entryRoom}>{item.room}</Text>
-                <Text style={styles.entryTime}>{item.timestamp}</Text>
-              </View>
-              {item.checks && item.checks.length > 0 && (
-                <View style={{ gap: 2 }}>
-                  {item.checks.map((c, ci) => (
-                    <Text key={ci} style={styles.criteriaCheck}>• {c}</Text>
-                  ))}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Text style={styles.entryTime}>{item.timestamp}</Text>
+                  <Pressable onPress={() => removeEntry(item.id)} hitSlop={8}>
+                    <Ionicons name="trash-outline" size={15} color="#ef4444" />
+                  </Pressable>
                 </View>
-              )}
+              </View>
+              <View style={{ gap: 6 }}>
+                {(item.checks || []).map((c, ci) => (
+                  <View key={ci} style={styles.checkEditRow}>
+                    <TextInput
+                      value={c}
+                      onChangeText={(txt) => updateEntryCheck(item.id, ci, txt)}
+                      style={[styles.input, styles.checkInput]}
+                      placeholder="Checklist field..."
+                    />
+                    <Pressable onPress={() => removeEntryCheck(item.id, ci)} hitSlop={6}>
+                      <Ionicons name="close-circle" size={18} color="#9ca3af" />
+                    </Pressable>
+                  </View>
+                ))}
+                <View style={styles.checkEditRow}>
+                  <TextInput
+                    value={newFieldByEntry[item.id] || ''}
+                    onChangeText={(txt) =>
+                      setNewFieldByEntry((prev) => ({ ...prev, [item.id]: txt }))
+                    }
+                    onSubmitEditing={() => addEntryCheck(item.id)}
+                    placeholder="+ Add field (e.g. Ceiling fan, Blinds)..."
+                    style={[styles.input, styles.checkInput]}
+                  />
+                  <Pressable
+                    style={styles.addFieldBtn}
+                    onPress={() => addEntryCheck(item.id)}
+                  >
+                    <Text style={styles.addFieldBtnText}>Add</Text>
+                  </Pressable>
+                </View>
+              </View>
               {item.photoUri ? <Image source={{ uri: item.photoUri }} style={styles.previewImg} /> : null}
-              {analyzingEntryId === item.id && (
-                <Text style={styles.aiStatus}>AI analyzing photo & writing condition report...</Text>
-              )}
               <TextInput
                 value={item.note}
                 onChangeText={(txt) =>
                   setEntries((prev) => prev.map((e) => (e.id === item.id ? { ...e, note: txt } : e)))
                 }
                 multiline
-                placeholder="Condition / defect report (auto-written by AI when you add a photo)..."
+                placeholder="Write condition / defect report..."
                 style={[styles.input, { minHeight: 58 }]}
               />
               <View style={styles.rowBtns}>
@@ -814,4 +880,9 @@ const styles = StyleSheet.create({
   modalBody: { fontSize: 12.5, lineHeight: 18, color: '#3f3f46' },
   checkboxRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, borderRadius: 12, backgroundColor: '#f4f4f5' },
   checkboxLabel: { flex: 1, fontSize: 12.5, fontWeight: '700', color: '#09090b' },
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  checkEditRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  checkInput: { flex: 1, paddingVertical: 6, paddingHorizontal: 10, fontSize: 12 },
+  addFieldBtn: { backgroundColor: '#eef2ff', borderWidth: 1, borderColor: '#c7d2fe', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
+  addFieldBtnText: { fontSize: 11, fontWeight: '800', color: '#4338ca' },
 });

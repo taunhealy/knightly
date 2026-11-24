@@ -52,7 +52,7 @@ class UserProfileModel(Base):
     name = Column(String, nullable=False, default="")
     photo = Column(Text, nullable=False, default="")
     tier = Column(String, nullable=False, default="free", index=True)
-    ai_credits = Column(Integer, nullable=False, default=50)
+    ai_credits = Column(Integer, nullable=False, default=0)
     auth_provider = Column(String, nullable=False, default="google")
     profile_json = Column(JSON, nullable=False, default=dict)
     created_at = Column(Float, nullable=False, default=time.time)

@@ -136,19 +136,26 @@ def upsert_listings(items: List[Dict[str, Any]], suburb_name: str, is_full_subur
                             if k in ex_raw:
                                 it[k] = ex_raw[k]
 
-            if stove_type in ("electric", "unknown", None, ""):
-                ex_vision = conn.execute(
-                    "SELECT stove_type, raw_json FROM listings WHERE id = ?",
-                    (lid,),
-                ).fetchone()
-                if ex_vision and ex_vision["stove_type"] in ("gas", "induction"):
-                    try:
-                        ex_v_raw = json.loads(ex_vision["raw_json"] or "{}")
-                    except Exception:
-                        ex_v_raw = {}
-                    if ex_v_raw.get("vision_verified"):
+            ex_vision = conn.execute(
+                "SELECT stove_type, raw_json FROM listings WHERE id = ?",
+                (lid,),
+            ).fetchone()
+            if ex_vision:
+                try:
+                    ex_v_raw = json.loads(ex_vision["raw_json"] or "{}")
+                except Exception:
+                    ex_v_raw = {}
+                if ex_v_raw.get("vision_verified"):
+                    it = {**it, "vision_verified": True}
+                    if stove_type in ("electric", "unknown", None, "") and ex_vision["stove_type"] in ("gas", "induction"):
                         stove_type = ex_vision["stove_type"]
-                        it = {**it, "stove_type": stove_type, "vision_verified": True}
+                        it["stove_type"] = stove_type
+                    if ex_v_raw.get("dwelling_privacy"):
+                        it["dwelling_privacy"] = ex_v_raw["dwelling_privacy"]
+                        if "is_landlord_on_site" in ex_v_raw:
+                            it["is_landlord_on_site"] = ex_v_raw["is_landlord_on_site"]
+                    if ex_v_raw.get("vision_privacy_verdict"):
+                        it["vision_privacy_verdict"] = ex_v_raw["vision_privacy_verdict"]
 
             raw_json = json.dumps(it)
 
@@ -483,9 +490,11 @@ def update_listing_unit(
 def update_listing_vision_attributes(
     listing_id: str,
     stove_type: Optional[str] = None,
+    dwelling_privacy: Optional[str] = None,
+    is_landlord_on_site: Optional[bool] = None,
     vision_summary: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Persists AI Vision-verified attributes (e.g. stove_type) into the shared listings DB pool."""
+    """Persists AI Vision-verified attributes (stove_type, dwelling_privacy) into the shared listings DB pool."""
     lid = str(listing_id).strip()
     if not lid:
         return False
@@ -509,8 +518,14 @@ def update_listing_vision_attributes(
         new_stove = stove_type if stove_type in ("gas", "induction", "electric") else row["stove_type"]
         if new_stove:
             raw["stove_type"] = new_stove
+        if dwelling_privacy in ("apartment_block", "freestanding_house", "garden_cottage", "attached_flatlet", "room_shared"):
+            raw["dwelling_privacy"] = dwelling_privacy
+            if is_landlord_on_site is not None:
+                raw["is_landlord_on_site"] = bool(is_landlord_on_site)
         raw["vision_verified"] = True
         if vision_summary:
+            if vision_summary.get("privacy_verdict"):
+                raw["vision_privacy_verdict"] = vision_summary.get("privacy_verdict")
             raw["vision_audit"] = {
                 "wfh_layout_verdict": vision_summary.get("wfh_layout_verdict"),
                 "window_light_audit": vision_summary.get("window_light_audit"),
@@ -518,11 +533,67 @@ def update_listing_vision_attributes(
                 "ceiling_volume_audit": vision_summary.get("ceiling_volume_audit"),
                 "lighting_fixtures_audit": vision_summary.get("lighting_fixtures_audit"),
                 "exterior_building_audit": vision_summary.get("exterior_building_audit"),
+                "dwelling_privacy": dwelling_privacy or vision_summary.get("dwelling_privacy"),
+                "privacy_verdict": vision_summary.get("privacy_verdict"),
             }
 
         conn.execute(
             "UPDATE listings SET stove_type = ?, raw_json = ?, updated_at = ? WHERE id = ?",
             (new_stove, json.dumps(raw), now, row["id"]),
+        )
+        conn.commit()
+        return True
+
+
+def update_listing_detail_fields(
+    listing_id: str,
+    fields: Dict[str, Any],
+) -> bool:
+    """Persists detail-page enrichment (description, privacy, parking, stove, inverter, pets) while respecting vision_verified overrides."""
+    lid = str(listing_id or "").strip()
+    if not lid or not isinstance(fields, dict) or not fields:
+        return False
+    raw_pid = lid.replace("p24-", "")
+    norm_lid = f"p24-{raw_pid}" if raw_pid.isdigit() else lid
+    now = time.time()
+
+    with _get_connection() as conn:
+        row = conn.execute(
+            "SELECT id, title, address, bedrooms, stove_type, has_garage, has_secure_bay, parking_type, has_inverter, pet_friendly, raw_json FROM listings WHERE id = ? OR p24_id = ? LIMIT 1",
+            (norm_lid, raw_pid),
+        ).fetchone()
+        if not row:
+            return False
+
+        try:
+            raw = json.loads(row["raw_json"] or "{}")
+        except Exception:
+            raw = {}
+
+        is_vision = bool(raw.get("vision_verified"))
+        merged_fields = dict(fields)
+        if is_vision:
+            for k in ("stove_type", "dwelling_privacy", "is_landlord_on_site"):
+                if raw.get(k) is not None:
+                    merged_fields.pop(k, None)
+
+        for k, v in merged_fields.items():
+            if v is not None:
+                raw[k] = v
+
+        next_stove = raw.get("stove_type") or row["stove_type"]
+        next_garage = 1 if raw.get("has_garage") else row["has_garage"]
+        next_bay = 1 if raw.get("has_secure_bay") else row["has_secure_bay"]
+        next_parking = raw.get("parking_type") or row["parking_type"]
+        next_inverter = 1 if raw.get("has_inverter") else row["has_inverter"]
+        next_pet = (1 if raw.get("pet_friendly") else 0) if raw.get("pet_friendly") is not None else row["pet_friendly"]
+
+        conn.execute(
+            """UPDATE listings
+               SET stove_type = ?, has_garage = ?, has_secure_bay = ?, parking_type = ?,
+                   has_inverter = ?, pet_friendly = ?, raw_json = ?, updated_at = ?
+               WHERE id = ?""",
+            (next_stove, next_garage, next_bay, next_parking, next_inverter, next_pet, json.dumps(raw), now, row["id"]),
         )
         conn.commit()
         return True

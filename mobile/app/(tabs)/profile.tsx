@@ -390,29 +390,6 @@ export default function ProfileScreen() {
         </Pressable>
       </View>
 
-      {/* Radar Alert Notifications */}
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Alert Notifications (Email & WhatsApp)</Text>
-        <TextInput
-          value={notifyEmail}
-          onChangeText={setNotifyEmail}
-          autoCapitalize="none"
-          keyboardType="email-address"
-          placeholder="Notification email"
-          style={styles.input}
-        />
-        <TextInput
-          value={whatsapp}
-          onChangeText={setWhatsapp}
-          keyboardType="phone-pad"
-          placeholder="WhatsApp number (e.g. +27821234567)"
-          style={styles.input}
-        />
-        <Pressable style={[styles.saveBtn, { paddingVertical: 10, alignItems: 'center' }]} onPress={handleSaveContact}>
-          <Text style={styles.saveText}>{contactSaved ? 'Notification Settings Saved ✓' : 'Save Notification Settings'}</Text>
-        </Pressable>
-      </View>
-
       {/* Saved Favourites */}
       <View style={styles.card}>
         <View style={styles.rowBetween}>
